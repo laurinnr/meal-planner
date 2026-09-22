@@ -98,6 +98,7 @@ this size. The ESLint plugin ecosystem is richer, but nothing here needs it.
 | Auth | better-auth | 1.7 |
 | Logging | pino | 10.x |
 | LLM | `@anthropic-ai/sdk` | 0.127 |
+| Effects (inside `packages/ai` only) | `effect` + `@effect/vitest` | 3.22 / 0.30 |
 
 **Why Hono over Fastify or NestJS.** Hono is built on web-standard `Request`/
 `Response`, which means its streaming story (`streamSSE`) composes directly with the
@@ -364,6 +365,7 @@ meal-planner/
 │   ├── core/                   # Pure domain logic. Depends only on contracts.
 │   ├── db/                     # Drizzle schema, migrations, client factory
 │   └── ai/                     # Anthropic client, prompts, tools, capabilities
+│                               #   the one Effect package; exports Promises (§6.5)
 ├── docker/
 │   ├── compose.yaml
 │   ├── Dockerfile              # api image (multi-stage)
@@ -385,6 +387,10 @@ free of I/O so it can be tested at microsecond speed.
 Three distinct capabilities, each exercising a different part of the Claude API.
 They live behind named functions in `packages/ai` — not a generic `askClaude()`.
 A generic wrapper is how prompt logic ends up scattered through route handlers.
+
+`packages/ai` is also the one place in the codebase written with **Effect** (§6.5).
+The boundary is the package: inside it, capabilities are `Effect` values; at the
+exported edge they are `Promise`s, and nothing outside needs to know.
 
 Model: **`claude-opus-5`** throughout, with adaptive thinking
 (`thinking: { type: "adaptive" }`) on the reasoning-heavy paths. Cost at household
@@ -500,10 +506,11 @@ deterministic tool ordering) and put volatile content last, behind the last
 across repeated requests, something in the prefix is changing. The `ai_calls` table
 makes this a query rather than an investigation.
 
-**Error handling.** Catch a chain, most-specific first — `NotFoundError` →
-`RateLimitError` → `APIStatusError` → `APIConnectionError` — because the retry
-policy differs per case. Check `stop_reason` before reading `content`; a `refusal`
-returns HTTP 200 with content you shouldn't parse.
+**Error handling.** The SDK's exceptions are narrowed most-specific first —
+`NotFoundError` → `RateLimitError` → `APIStatusError` → `APIConnectionError` — and
+mapped onto the tagged error union in §6.5, because the retry policy differs per
+case. Check `stop_reason` before reading `content`; a `refusal` returns HTTP 200
+with content you shouldn't parse, and is never retried.
 
 **Offline degradation.** The homelab will lose its internet connection. AI endpoints
 must fail soft behind a feature flag, and every AI-powered flow needs a manual
@@ -538,6 +545,69 @@ One verified papercut: `sqlite-vec` 0.1.9 rejects a `rowid` bound as a plain JS
 number from `better-sqlite3` 13 (`Only integers are allows for primary key values`).
 Bind a `BigInt` instead — `stmt.run(1n, vec)` works. Worth a comment in the code, or
 you will lose an evening to it.
+
+### 6.5 Effect, scoped to this package
+
+Everything in §6.4 — retry with backoff, timeouts, rate limiting, spans, typed
+failure — is what an effect system is for. Rather than hand-roll each one as
+middleware, `packages/ai` is written in Effect and exports plain `Promise`s.
+
+```ts
+const extractRecipe = callClaude.pipe(
+  Effect.retry({
+    schedule: Schedule.exponential(Duration.seconds(1)).pipe(Schedule.jittered),
+    while: (e) => e._tag === "RateLimited",     // retry this, never a Refusal
+    times: 4,
+  }),
+  Effect.timeout(Duration.seconds(30)),
+  Effect.withSpan("ai.extractRecipe"),
+)
+```
+
+Failures are tagged errors — `RateLimited`, `Refused`, `ParseFailed`, `Timeout` —
+so the retry predicate is exhaustive over a union the compiler knows, rather than a
+string match on a message. The same union maps to HTTP status codes in one
+`Match` at the route boundary.
+
+**Two rules keep the adoption bounded.**
+
+*The package is the boundary.* Capability functions are `Effect` values internally;
+the package exports `Promise`-returning functions that `Effect.runPromise` at the
+edge and map the error channel onto ordinary rejected promises with typed causes.
+Hono routes, services, and the job worker see nothing but async functions. If Effect
+is later judged not to have earned its place, it is deleted from one package.
+
+*Effect for effects, Zod for data.* Effect's `Schema` is capable — it emits
+`additionalProperties: false` by default, so it would drive Claude's structured
+outputs fine — but adopting it would mean either migrating `packages/contracts`
+wholesale or running two schema libraries, and two is strictly worse than one. Zod
+stays the single data language and the §4 type-safety chain is untouched. Effect
+handles control flow only.
+
+**What it buys, concretely:** `Schedule` composes backoff, jitter, and caps as a
+value, so the retry policy is testable in isolation; `Semaphore` caps API
+concurrency in one line; `Effect.withSpan` emits OpenTelemetry spans with no
+tracing setup, which feeds the `ai_calls` accounting (§6.4) and gives §8.7 a head
+start; and `@effect/vitest`'s `TestClock` makes retry and timeout paths
+deterministic — the backoff test runs instantly instead of actually sleeping
+fifteen seconds.
+
+**The cost, stated honestly.** Effect is a paradigm, not a library. Coming from
+cats-effect the concepts transfer almost entirely — `Ref`, `Deferred`, `Fiber`,
+`Queue`, `Scope`, `Stream`, `Schedule` are the same ideas under the same names — but
+three things are genuinely different: no higher-kinded types, so no tagless final;
+`Effect.gen(function* () { … })` in place of a for-comprehension, and generators are
+single-use; and type errors on long pipelines get rough, because `E` and `R`
+accumulate as unions. Note also that `Effect<A, E, R>` puts its parameters in the
+opposite order to ZIO's `ZIO[R, E, A]`.
+
+**When to widen it.** The obvious next step is the `R` channel for tenancy:
+`Effect<Recipe, NotFound, Database | Household>` cannot be run without a household
+provided, which promotes §4.1's structural scoping from a convention about module
+exports into the type system. That is a real improvement, and it is deliberately
+deferred — it only pays off once the call stack from route to repository is Effect
+throughout, which means replacing the Hono and Drizzle integration layers.
+Revisit it after phase 5, with actual experience, rather than deciding now.
 
 ---
 
@@ -718,7 +788,7 @@ only once there's data for it to work on.
 | **0. Walking skeleton** | Monorepo, CI, Compose, Caddy, SQLite, `/health`, one typed route rendered in the SPA — **deployed to the homelab** | Deploy on day one. Every later phase is then a small delta, and you never face a big-bang first deploy. |
 | **1. Households + recipes** | Auth, `household_members`, `forHousehold()` repositories, the isolation test, then recipe CRUD typed end-to-end | Tenancy lands with the first tables, not after them. Proves the type chain and gives the AI features somewhere to write. |
 | **2. Plan & shopping list** | Week grid, aggregation, unit conversion, store sections | The genuinely interesting domain logic. Heavy unit tests, no AI, no network. |
-| **3. AI: recipe import** | JSON-LD fast path → Claude structured-output fallback, photo import, `ai_calls` logging | First AI feature, highest value, and it's the one that fills the database. |
+| **3. AI: recipe import** | JSON-LD fast path → Claude structured-output fallback, photo import, `ai_calls` logging. Effect enters here, in `packages/ai` only | First AI feature, highest value, and it's the one that fills the database. Effect lands with the first code that needs retries and timeouts, not before. |
 | **4. AI: streaming chat** | SSE envelope, Hono `streamSSE`, React stream consumer | Streaming touches every layer — good architectural stress test. |
 | **5. AI: week planning agent** | Tool runner, four tools, draft-and-confirm UX, budget caps | Needs phases 1–3 in place to have anything to reason over. |
 | **6. Polish** | PWA + Tailscale, `sqlite-vec` semantic search, cost dashboard, Playwright E2E | The "actually use it" phase. |
@@ -745,10 +815,14 @@ a plane, the app still does its job.
 | Containers | Docker Compose | Podman Quadlet; k3s | Compose is the portable interface — Podman runs the same file, so local dev can be rootless without the deployment target changing. |
 | Backups | Litestream continuous | Nightly dump | Recovery point in seconds. Keep a periodic `VACUUM INTO` snapshot alongside it. |
 | Remote access | Tailscale | Port-forward + DDNS | Nothing exposed to the internet. |
+| Effects | Effect, inside `packages/ai` only | Effect everywhere; plain async/await | Retries, timeouts, typed failures and spans are what it's for, and the package boundary keeps it reversible. Everywhere means re-deciding Hono, Drizzle and Zod. |
 | AI provider | Anthropic hosted | Local Ollama | Structured outputs and tool use are reliable, which is what these features depend on. |
 
 ### Where this would change
 
+- **If Effect doesn't earn its place:** it lives in one package behind a
+  `Promise`-returning interface (§6.5). Removing it means rewriting `packages/ai`
+  internals against plain async/await — no caller changes.
 - **If AI cost or privacy became a concern:** `packages/ai` is the seam. Its three
   capability functions are the entire surface; swapping the implementation for a
   local model means rewriting one package, not the app. Structured extraction would
@@ -774,7 +848,10 @@ a plane, the app still does its job.
 2. **Metric or imperial, or both?** Affects the unit-conversion core and whether
    recipes store canonical units with display-time conversion (recommended) or store
    whatever was entered.
-3. **How far does the pantry go?** Full inventory tracking with depletion is a
+3. **Does Effect widen past `packages/ai`?** Deliberately deferred to after phase 5
+   (§6.5). The `R`-channel tenancy argument is good; the cost is replacing the Hono
+   and Drizzle integration layers. Decide with experience, not in advance.
+4. **How far does the pantry go?** Full inventory tracking with depletion is a
    commitment to keeping it accurate, and an inaccurate pantry is worse than none.
    A lighter "things to use up" list gets most of the value into the planning agent
    for a fraction of the effort.

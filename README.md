@@ -18,7 +18,7 @@ Pre-implementation. The design is in **[docs/architecture.md](docs/architecture.
 | Language | TypeScript 7, Node 24, pnpm workspaces, Turborepo |
 | Backend | Hono + `@hono/zod-openapi`, Drizzle ORM (`sqlite-core`), SQLite |
 | Frontend | Vite, React 19, TanStack Router/Query/Form, Tailwind 4 |
-| AI | Claude (`@anthropic-ai/sdk`) — structured outputs, tool use, streaming |
+| AI | Claude (`@anthropic-ai/sdk`) — structured outputs, tool use, streaming; Effect inside `packages/ai` |
 | Deployment | Docker Compose behind Caddy (runs under Podman too), over Tailscale |
 
 ## Layout
@@ -29,7 +29,7 @@ apps/web        React SPA (PWA)
 packages/contracts   Zod schemas — the single source of truth for types
 packages/core        Pure domain logic (aggregation, unit conversion)
 packages/db          Drizzle schema + migrations (SQLite), tenant-scoped repositories
-packages/ai          Claude capabilities: extract, chat, plan
+packages/ai          Claude capabilities: extract, chat, plan (Effect; exports Promises)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the reasoning behind each
