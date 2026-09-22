@@ -37,6 +37,8 @@ Architecture without a domain is hand-waving, so here is the thing being built.
 
 | Entity | Notes |
 |---|---|
+| **Household** | The tenant. Every row below belongs to exactly one. |
+| **User** | A person. Belongs to one or more households via `HouseholdMember` (user_id, household_id, role). |
 | **Recipe** | Title, source URL, servings, prep/cook time, steps, tags. Has many `RecipeIngredient`. |
 | **Ingredient** | Canonical food item ("plum tomato"). Deduplicated across recipes. |
 | **RecipeIngredient** | Join row: quantity, unit, preparation note ("finely chopped"), optional flag. |
@@ -44,7 +46,11 @@ Architecture without a domain is hand-waving, so here is the thing being built.
 | **PlannedMeal** | (date, slot: breakfast/lunch/dinner, recipe, servings). |
 | **ShoppingList** | Derived from a `MealPlan`, minus pantry. Grouped by store section. |
 | **PantryItem** | What's already in the house, with quantity and optional expiry. |
-| **AiCall** | Audit row for every Claude request — feature, model, tokens, cost, latency. |
+| **AiCall** | Audit row for every Claude request — household, feature, model, tokens, cost, latency. |
+
+`Ingredient` is the one table that is deliberately *not* tenant-scoped: "plum tomato"
+is a shared vocabulary, and duplicating it per household buys nothing. Everything else
+carries a `household_id`.
 
 The interesting logic — the part worth writing tests for before writing any UI — is
 **shopping list aggregation**: merging `2 cloves garlic` + `1 tbsp minced garlic` +
@@ -125,26 +131,31 @@ What we give up, and the mitigation in each case:
 | pgvector | `sqlite-vec` — works, with one papercut (§6.4) |
 | Concurrent writers | WAL gives one writer + many readers. Irrelevant at this scale, with one rule attached (§6.4) |
 
-**Why Drizzle and not Kysely.** Kysely is closer in spirit to a minimal SQL wrapper
-— its `sql` tag and `sql.join` compose into fragments cleanly, and `kysely-codegen`
-derives types from the live schema. Drizzle wins here on migrations: `drizzle-kit`
-generates them from the TypeScript schema, where Kysely expects you to hand-write
-every one. Crucially, Drizzle's own `sql` template tag composes into fragments
-*identically*, so nothing is lost on that axis:
+**Why Drizzle and not Kysely.** Kysely is closer in spirit to a minimal SQL wrapper,
+and `kysely-codegen` derives types from the live schema. Drizzle wins on migrations:
+`drizzle-kit` generates them from the TypeScript schema, where Kysely expects you to
+hand-write every one.
+
+The idiomatic Drizzle query builder covers the ergonomics that would otherwise argue
+for raw SQL. `and()` drops `undefined` operands, so conditional filters compose
+without a fragment helper:
 
 ```ts
-const whereAndOpt = (...frags: (SQL | undefined)[]) => {
-  const present = frags.filter(Boolean) as SQL[]
-  return present.length ? sql`where ${sql.join(present, sql` and `)}` : sql.empty()
-}
-const maxTime = (m?: number) => m == null ? undefined : sql`r.total_minutes <= ${m}`
-const hasTag  = (t?: string) => t == null ? undefined : sql`exists (
-  select 1 from recipe_tags rt where rt.recipe_id = r.id and rt.tag = ${t})`
+const listRecipes = (householdId: HouseholdId, f: RecipeFilter) =>
+  db.select().from(recipes).where(and(
+    eq(recipes.householdId, householdId),                                  // always
+    f.maxMinutes == null ? undefined : lte(recipes.totalMinutes, f.maxMinutes),
+    f.tag == null ? undefined : exists(
+      db.select().from(recipeTags).where(and(
+        eq(recipeTags.recipeId, recipes.id),
+        eq(recipeTags.tag, f.tag)))),
+  ))
 ```
 
-Values bind as `?` placeholders, not interpolated text. Use the query builder for
-the routine 90%, and drop to `sql` fragments for the shopping-list aggregation and
-the FTS5 queries, where SQL reads better than any builder.
+With both optional filters absent that emits `where "household_id" = ?` and nothing
+else — no dangling `and`, no empty parentheses. Keep `sql` for the places SQL genuinely
+reads better than a builder: the shopping-list aggregation and the FTS5 match queries.
+Everything else goes through the builder.
 
 **Why better-auth.** TypeScript-native, has a first-party Drizzle adapter, and
 handles sessions, email+password, and passkeys without a hosted dependency.
@@ -235,6 +246,104 @@ type each independently; or switch the client to `openapi-typescript` +
 costs a codegen step but has flat inference cost — and the doc is already there, so
 it's a contained change rather than a rewrite.
 
+### 4.1 Multi-tenancy
+
+Every tenant-scoped table carries `household_id` from the first migration. Adding it
+later would mean backfilling every table and rewriting every query, and under SQLite
+that is a table-recreate per table — so it goes in now even while it only ever holds
+one value.
+
+Adding the column is the easy part. The hard part is that a tenant leak is one
+forgotten `where` clause, and nothing in TypeScript notices. Four mechanisms, in
+descending order of how much they actually protect you:
+
+**1. The raw handle never escapes `packages/db`.** The package exports
+`forHousehold(householdId)`, not `db`. Every repository function is reached through
+it, and the predicate is applied inside:
+
+```ts
+// packages/db — the only place the Drizzle handle is in scope
+export function forHousehold(id: HouseholdId) {
+  return {
+    recipes: {
+      list: (f: RecipeFilter) => db.select().from(recipes)
+        .where(and(eq(recipes.householdId, id), ...filters(f))),
+      byId: (recipeId: RecipeId) => db.select().from(recipes)
+        .where(and(eq(recipes.householdId, id), eq(recipes.id, recipeId))).get(),
+    },
+    // …
+  }
+}
+```
+
+Forgetting the scope stops being a discipline problem, because there is no API that
+lets you forget it. This is the mechanism that does the real work; the rest are
+backstops.
+
+**2. Branded IDs.** `HouseholdId`, `RecipeId`, and `UserId` are branded strings, not
+bare `string`. Passing a `UserId` where a `HouseholdId` belongs is a compile error
+rather than a silent empty result set. Cheap, and it catches the confusions that
+actually happen.
+
+**3. Composite primary keys and composite foreign keys.** Tenant tables are keyed on
+`(household_id, id)`, and references between them carry the household through:
+
+```sql
+create table planned_meals (
+  household_id text not null,
+  id           text not null,
+  recipe_id    text not null,
+  primary key (household_id, id),
+  foreign key (household_id, recipe_id) references recipes(household_id, id)
+);
+```
+
+The database then refuses to let a meal in one household point at a recipe in
+another — a class of bug that survives a correct `where` clause, because the join
+itself is what's wrong. I verified SQLite enforces this:
+
+```
+insert into planned_meals values ('h1','m1','r2')  -- h1 meal → h2 recipe
+  → FOREIGN KEY constraint failed
+```
+
+Two caveats. `better-sqlite3` issues `PRAGMA foreign_keys = ON` on every connection it
+opens, but SQLite's own default is OFF — anything reaching the file by another path
+(the `sqlite3` CLI, a different driver) will not enforce these, so treat it as a
+property of the connection and not of the file. And drizzle-kit's table-recreate
+migrations drop and rebuild foreign keys, so read those migrations rather than
+approving them on sight (§8.4).
+
+**4. An isolation test.** Seed two households, then call every repository function as
+household A and assert it returns nothing belonging to B. Because an in-memory SQLite
+database costs microseconds (§3.4), this can run over the whole repository surface on
+every test run rather than a sampled subset. Make it a loop over the exported
+repository object so a newly added function is covered the day it's written — not one
+hand-maintained case per function, which is the version that rots.
+
+**Where the household comes from.** better-auth resolves the session to a `UserId`;
+Hono middleware looks up `household_members` and puts a `HouseholdId` on the request
+context. A user can belong to several households, so the active one is part of the
+session, not a column on the user. The `household_id` is never read from a request
+body or a query parameter.
+
+**The AI layer has one extra rule: tenant scope is closed over, never a tool
+parameter.** Tools in §6.3 are constructed bound to the household from the request
+context. If `household_id` were an argument in a tool's input schema, the model could
+supply any value — and a hallucinated identifier would be indistinguishable from an
+attack. The model gets tools that can only see one household because that is the only
+household they were built to see.
+
+**Indexing.** `household_id` goes first in every composite index. Every query filters
+on it, so an index that doesn't lead with it is mostly wasted.
+
+**The alternative, for the record:** SQLite makes database-per-tenant unusually
+attractive — one file per household gives perfect isolation and a trivially simple
+backup story. It is rejected here because cross-household features (sharing a recipe
+with your in-laws) turn into cross-database work, and because at one-to-three
+households the column costs less. If this ever became a real multi-tenant product,
+that trade would be worth revisiting.
+
 ---
 
 ## 5. Repository layout
@@ -255,9 +364,9 @@ meal-planner/
 │   ├── core/                   # Pure domain logic. Depends only on contracts.
 │   ├── db/                     # Drizzle schema, migrations, client factory
 │   └── ai/                     # Anthropic client, prompts, tools, capabilities
-├── deploy/
-│   ├── quadlet/                # .container / .network / .volume units
-│   ├── Containerfile           # api image (multi-stage)
+├── docker/
+│   ├── compose.yaml
+│   ├── Dockerfile              # api image (multi-stage)
 │   ├── Caddyfile
 │   └── litestream.yml
 ├── docs/
@@ -368,9 +477,10 @@ Guardrails, because an agent with database access is a liability without them:
 
 - Every tool is **read-only** except `propose_plan`, which returns a draft the user
   confirms in the UI. Nothing is written to the database by the model.
-- Tool inputs are Zod-validated (`betaZodTool` does this) and every tool re-applies
-  the user's authorisation scope server-side — the model's arguments are untrusted
-  input, exactly like a request body.
+- Tool inputs are Zod-validated (`betaZodTool` does this), and every tool is built
+  over `forHousehold(ctx.householdId)` — the scope is closed over, never an argument
+  the model supplies (§4.1). The model's arguments are untrusted input, exactly like
+  a request body.
 - A hard iteration cap and a `task_budget` so a confused loop can't run up a bill.
 - Every tool call logged with its arguments. When a plan comes out strange, the
   trace tells you whether the problem was the prompt, the data, or the tools.
@@ -445,16 +555,17 @@ Small app, but the habits are the point.
   reject private/loopback/link-local ranges, cap redirects, cap response size, set a
   timeout. This matters more than usual because the server sits *inside* a homelab
   with other services on the same network.
+- **Tenant isolation is structural, not procedural** (§4.1): the Drizzle handle never
+  leaves `packages/db`, composite foreign keys stop cross-household references at the
+  database, and an isolation test sweeps the whole repository surface.
 - **Model output is untrusted input.** Tool arguments get validated and re-authorised
   server-side. Extracted recipe text gets rendered as text, never as HTML.
-- **Rootless containers.** The API runs as an unprivileged user with `DropCapability=ALL`
-  and `NoNewPrivileges=true`, so compromising the Node process does not hand over the
-  host. This pairs directly with the SSRF surface above: the two highest-risk pieces
-  of this app are an outbound fetcher and an LLM with tool access, and rootless is the
-  cheapest meaningful containment for both.
-- **Secrets.** An env file on the host, gitignored, mode `600`, referenced by
-  `EnvironmentFile=`. Podman secrets or SOPS + age is the next step when you want the
-  config in git.
+- **Container hardening.** Run the API as a non-root user with `no-new-privileges`
+  and `cap_drop: [ALL]`. Running the stack under rootless Podman (§8.2) adds a second
+  layer for free. This pairs directly with the SSRF surface above: the two highest-risk
+  pieces of this app are an outbound fetcher and an LLM with tool access.
+- **Secrets.** A `.env` on the host, gitignored, mode `600`. Docker secrets or SOPS +
+  age is the next step when you want the config in git.
 
 ---
 
@@ -462,14 +573,14 @@ Small app, but the habits are the point.
 
 ### 8.1 Topology
 
-Single host, **rootless Podman**, units managed by systemd via Quadlet. SQLite
-removed the database container, so there are two:
+Single host, Docker Compose. SQLite removed the database container, so there are two
+services:
 
 ```
               ┌──────────────────────────────────────────┐
   LAN ───────►│ caddy      :443  TLS, static SPA, /api/* │
   Tailscale   └────────────┬─────────────────────────────┘
-                           │ /api/* → api:3000  (podman network)
+                           │ /api/* → api:3000
               ┌────────────▼─────────────────────────────┐
               │ api    Node 24 + Hono                    │──► api.anthropic.com
               │        litestream -exec "node ..."       │──► off-host replica
@@ -478,148 +589,52 @@ removed the database container, so there are two:
               └──────────────────────────────────────────┘
 ```
 
-Caddy serves the built SPA as static files and reverse-proxies `/api/*` — no
-separate web container, and no CORS, because everything is same-origin.
+Caddy serves the built SPA as static files and reverse-proxies `/api/*` — no separate
+web container, and no CORS, because everything is same-origin.
 
 **The one rule that matters here: the SQLite file must never live on the container's
-overlay filesystem.** SQLite's WAL mode depends on POSIX advisory locking and
-coherent mmap of the `-shm` file, and overlay and network filesystems
+overlay filesystem.** SQLite's WAL mode depends on POSIX advisory locking and coherent
+mmap of the `-shm` file, and overlay and network filesystems
 [break both, with corruption as the symptom rather than an error](https://sqlite.org/howtocorrupt.html).
-Put it on a named volume or a bind mount — both are real host filesystem — and never
-in a path that falls through to the image's writable layer. This was a non-issue with
-Postgres and is now the single most important deployment detail.
+Put it on a named volume — a real host filesystem — and never in a path that falls
+through to the image's writable layer. This was a non-issue with Postgres and is now
+the single most important deployment detail.
 
-### 8.2 Why Podman, and what actually changes
+### 8.2 Running it with Podman
 
-Rootless is the point: the container runs as your unprivileged user, so a compromise
-of the Node process is not a path to root on the homelab host. Combined with the
-existing SSRF surface on recipe import (§7), that is a meaningful reduction. systemd
-integration via Quadlet is the second win — restart policy, boot ordering, and log
-collection come from the init system you already run rather than a second daemon.
+The Compose file is the interface, and Podman consumes it — either through
+`podman compose` or by pointing the Docker CLI at Podman's compatible socket. Images
+are OCI either way, so nothing in the build changes. Three things bite when you run
+the same file rootless:
 
-Four things genuinely differ from Docker, and each needs a decision:
+- **Privileged ports.** A rootless container cannot bind 443. Either
+  `sysctl net.ipv4.ip_unprivileged_port_start=80`, or let `tailscale serve` terminate
+  TLS and bind Caddy high — which §8.6 leans on anyway.
+- **Volume ownership.** Rootless maps container UIDs into your subuid range, so files
+  a container writes appear on the host owned by a high-numbered UID. Invisible for
+  named volumes; for bind mounts use `userns: keep-id` so `litestream restore` works
+  without `sudo`. Keep `app.db` on a named volume and bind-mount only read-only config.
+- **SELinux.** On Fedora/RHEL, bind mounts need a `:Z` or `:z` suffix or the container
+  gets permission denied on a path that looks perfectly readable.
 
-**Privileged ports.** A rootless container cannot bind 80/443. Pick one:
-`sysctl net.ipv4.ip_unprivileged_port_start=80` (simplest, and it is a
-[documented, supported setting](https://github.com/containers/podman/blob/main/rootless.md));
-a firewall redirect from 443 to an unprivileged port; or bind Caddy high and let
-Tailscale Serve terminate TLS. Given §8.5 leans on Tailscale anyway, the sysctl is
-the least machinery.
+If the homelab host later moves to Podman too, Quadlet (`.container` systemd units) is
+the native path and worth the switch — but there is no reason to pay for it while
+Compose works on both.
 
-**Volume ownership.** Rootless Podman maps container UIDs into your subuid range, so
-files a container writes appear on the host owned by a high-numbered UID. For a named
-volume this is invisible and fine. For a bind mount you want `--userns=keep-id` (or
-`UserNS=keep-id` in the unit) so the file is owned by you and `litestream restore`
-works without `sudo`. Use a named volume for `app.db` and bind mounts only for
-read-only config.
+### 8.3 Images
 
-**SELinux.** On Fedora/RHEL, bind mounts need a `:Z` (private) or `:z` (shared) label
-suffix or the container gets permission denied on a path that looks perfectly
-readable. Named volumes are labelled automatically.
-
-**Compose is not the interface.** `podman-compose` exists and mostly works, and
-Podman can expose a Docker-compatible socket for real `docker compose`. Both are
-compatibility shims. Quadlet is the native path and is what
-[Podman's own docs now recommend](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
-— `podman generate systemd` is deprecated in its favour.
-
-### 8.3 Quadlet units
-
-Rootless units live in `~/.config/containers/systemd/`. systemd generates a real
-service from each at daemon-reload.
-
-```ini
-# ~/.config/containers/systemd/meal-planner.network
-[Network]
-NetworkName=meal-planner
-```
-
-```ini
-# ~/.config/containers/systemd/meal-planner-data.volume
-[Volume]
-VolumeName=meal-planner-data
-```
-
-```ini
-# ~/.config/containers/systemd/meal-planner-api.container
-[Unit]
-Description=Meal Planner API
-After=network-online.target
-
-[Container]
-Image=ghcr.io/laurinnr/meal-planner-api:latest
-AutoUpdate=registry
-Network=meal-planner.network
-Volume=meal-planner-data.volume:/data
-EnvironmentFile=%h/.config/meal-planner/api.env
-Environment=DATABASE_PATH=/data/app.db
-HealthCmd=wget -qO- http://localhost:3000/health || exit 1
-HealthInterval=30s
-HealthStartPeriod=10s
-NoNewPrivileges=true
-DropCapability=ALL
-
-[Service]
-Restart=always
-
-[Install]
-WantedBy=default.target
-```
-
-```ini
-# ~/.config/containers/systemd/meal-planner-caddy.container
-[Unit]
-Description=Caddy
-After=network-online.target
-
-[Container]
-Image=docker.io/library/caddy:2-alpine
-AutoUpdate=registry
-Network=meal-planner.network
-PublishPort=80:80
-PublishPort=443:443
-Volume=%h/.config/meal-planner/Caddyfile:/etc/caddy/Caddyfile:ro,Z
-Volume=caddy-data.volume:/data
-Volume=meal-planner-web:/srv:ro
-
-[Service]
-Restart=always
-
-[Install]
-WantedBy=default.target
-```
-
-Then:
-
-```sh
-loginctl enable-linger "$USER"          # units start at boot, survive logout
-systemctl --user daemon-reload
-systemctl --user start meal-planner-api meal-planner-caddy
-systemctl --user enable --now podman-auto-update.timer   # honours AutoUpdate=registry
-```
-
-`loginctl enable-linger` is the step everyone forgets — without it the units stop
-when you log out and never come back after a reboot.
-
-> These units are written from the Quadlet reference, not executed — Podman was not
-> available where this was drafted. Expect to iterate on the `HealthCmd` quoting and
-> the exact `Volume=` spellings on first run; `systemctl --user status` and
-> `journalctl --user -u meal-planner-api` will tell you which.
-
-### 8.4 Images
-
-Multi-stage build for the API — the Containerfile is a Dockerfile, byte for byte:
+Multi-stage Dockerfile for the API:
 
 1. **deps** — `pnpm fetch` against the lockfile only, so the layer caches until a
    dependency actually changes.
 2. **build** — install, compile, then `pnpm deploy --filter=api --prod` for a pruned
    `node_modules` without the workspace dev tree.
 3. **runtime** — `node:24-alpine`, non-root user, pruned output plus the Litestream
-   binary.
+   binary, `HEALTHCHECK` hitting `/health`.
 
-`better-sqlite3` is a native module: build it in the same base image the runtime
-stage uses, or the prebuilt binary will not match the runtime's libc. `node:24-alpine`
-is musl — if prebuilds give trouble, `node:24-slim` (glibc) is the boring fix.
+`better-sqlite3` is a native module: build it in the same base image the runtime stage
+uses, or the prebuilt binary will not match the runtime's libc. `node:24-alpine` is
+musl — if prebuilds give trouble, `node:24-slim` (glibc) is the boring fix.
 
 Entrypoint wraps the app in Litestream so replication and process lifetime are the
 same thing:
@@ -628,30 +643,29 @@ same thing:
 litestream replicate -exec "node dist/main.js"
 ```
 
-The SPA is a separate build stage; its `dist/` is published into a volume Caddy
-serves read-only.
+The SPA is a separate build stage whose `dist/` is copied into the Caddy image.
 
-### 8.5 Config, migrations, backups
+### 8.4 Config, migrations, backups
 
-- **Config:** env vars only, via `EnvironmentFile=`. Mode `600`, gitignored, nothing
+- **Config:** env vars only, `.env` on the host, mode `600`, gitignored. Nothing
   environment-specific baked into an image.
 - **Migrations:** drizzle-kit generates SQL files, committed to git. They run as an
-  explicit step — a `Type=oneshot` unit or `podman exec` — **not** on API boot.
-  Auto-migrate on boot is how you discover a bad migration during a restart loop.
-  With SQLite this matters more than usual: drizzle-kit emits table-recreate
-  migrations for column changes, so read them rather than skimming them.
+  explicit step — a one-shot Compose service or `compose exec` — **not** on API boot.
+  Auto-migrate on boot is how you discover a bad migration during a restart loop. With
+  SQLite this matters more than usual: drizzle-kit emits table-recreate migrations for
+  column changes, so read them rather than skimming them. A table recreate also drops
+  and rebuilds foreign keys — see the tenancy note in §4.1 before approving one.
 - **Backups:** Litestream replicates continuously to a second physical disk or an
-  S3-compatible target, which is a strictly better story than nightly `pg_dump` — the
-  recovery point is seconds, not a day. Two caveats: Litestream v0.5 rewrote its
-  storage format to LTX and
+  S3-compatible target, which beats a nightly dump — the recovery point is seconds,
+  not a day. Two caveats: Litestream v0.5 rewrote its storage format to LTX and
   [the v0.3 → v0.5 migration path has open bugs](https://github.com/benbjohnson/litestream/issues/1512),
   so start on v0.5 and don't plan to upgrade across it; and v0.5 dropped age
-  encryption. Also keep a periodic `VACUUM INTO` snapshot — a single consistent file
-  you can copy anywhere is worth having when the replica itself is what went wrong.
-  **Restore one into a scratch container and check the row counts.** A backup you have
-  never restored is a hypothesis.
+  encryption. Keep a periodic `VACUUM INTO` snapshot alongside — a single consistent
+  file you can copy anywhere is worth having when the replica is what went wrong.
+  **Restore one and check the row counts.** A backup you have never restored is a
+  hypothesis.
 
-### 8.6 Access from outside the LAN
+### 8.5 Access from outside the LAN
 
 A shopping list is used in a shop, which is not on your LAN. This is a real
 constraint, not a detail, and it has two answers:
@@ -659,8 +673,7 @@ constraint, not a detail, and it has two answers:
 - **Tailscale** (recommended). The host joins your tailnet; the phone reaches it from
   anywhere with nothing exposed to the internet. With Tailscale's HTTPS certs you also
   get a trusted certificate without a DNS-01 dance — and `tailscale serve` can
-  terminate TLS, which sidesteps the rootless privileged-port problem in §8.2
-  entirely.
+  terminate TLS, which sidesteps the rootless privileged-port problem in §8.2.
 - **Offline-first PWA.** Installable, caches the current shopping list, works with no
   connectivity at all. Worth doing anyway — supermarket signal is bad — but local
   writes and sync are a real project. Phase it as read-only caching first: the list
@@ -668,34 +681,25 @@ constraint, not a detail, and it has two answers:
 
 Do Tailscale first; treat offline write sync as a stretch goal.
 
-### 8.7 CI/CD
+### 8.6 CI/CD
 
 GitHub Actions on push: Biome → `tsc --noEmit` → Vitest → build image → push to GHCR.
 
-GitHub's runners ship Docker, not Podman, and **OCI images are interchangeable** —
-so build with Docker Buildx in CI and run with Podman on the host. That is the
-pragmatic split and it costs nothing. If you'd rather keep the toolchain uniform,
-`redhat-actions/buildah-build` builds with Buildah on the same runners.
+Deployment is a pull, not a push: `docker compose pull && docker compose up -d` on the
+host, run by hand or by a small `make deploy` over SSH. Manual deploys are honestly
+fine for a household app, and knowing exactly when one happened makes debugging easier.
 
-Deployment is a pull, not a push. Either `podman auto-update` on its timer (§8.3,
-driven by the `AutoUpdate=registry` label), or a `make deploy` that SSHes in and runs
-`systemctl --user restart`. Manual deploys are honestly fine for a household app, and
-knowing exactly when one happened makes debugging easier.
+Local development needs no containers at all — SQLite is a file and the API is a Node
+process. `pnpm dev` is the whole story, which is a real improvement over waiting for a
+Postgres container to become healthy.
 
-Note that local development needs no containers at all now — SQLite is a file and
-the API is a Node process. `pnpm dev` is the whole story, which is a real improvement
-over waiting for a Postgres container to become healthy.
-
-### 8.8 Observability
+### 8.7 Observability
 
 Start small and add when something actually hurts:
 
-- pino structured JSON logs to stdout. Under Quadlet these land in the journal:
-  `journalctl --user -u meal-planner-api -f`, with `--since`, `--grep` and
-  `-o json` for free. This is a genuine upgrade over `docker compose logs`.
+- pino structured JSON logs to stdout, read via `docker compose logs`.
 - `/health` (process alive) and `/ready` (can open and query the database), wired to
-  `HealthCmd=`. `systemctl --user status` then shows real health, and a failing
-  healthcheck is visible to the init system rather than only to a `podman ps` column.
+  Compose healthchecks.
 - The `ai_calls` table doubles as AI observability from day one.
 - OpenTelemetry plus a Grafana/Loki/Tempo stack is the natural next step and a good
   standalone learning project — but adding it before there's traffic to look at means
@@ -711,8 +715,8 @@ only once there's data for it to work on.
 
 | Phase | Deliverable | Why here |
 |---|---|---|
-| **0. Walking skeleton** | Monorepo, CI, Quadlet units, Caddy, SQLite, `/health`, one typed route rendered in the SPA — **deployed to the homelab** | Deploy on day one. Every later phase is then a small delta, and you never face a big-bang first deploy. |
-| **1. Recipes** | Full CRUD, typed end-to-end, migrations, integration tests | Proves the type chain and gives the AI features something to write into. |
+| **0. Walking skeleton** | Monorepo, CI, Compose, Caddy, SQLite, `/health`, one typed route rendered in the SPA — **deployed to the homelab** | Deploy on day one. Every later phase is then a small delta, and you never face a big-bang first deploy. |
+| **1. Households + recipes** | Auth, `household_members`, `forHousehold()` repositories, the isolation test, then recipe CRUD typed end-to-end | Tenancy lands with the first tables, not after them. Proves the type chain and gives the AI features somewhere to write. |
 | **2. Plan & shopping list** | Week grid, aggregation, unit conversion, store sections | The genuinely interesting domain logic. Heavy unit tests, no AI, no network. |
 | **3. AI: recipe import** | JSON-LD fast path → Claude structured-output fallback, photo import, `ai_calls` logging | First AI feature, highest value, and it's the one that fills the database. |
 | **4. AI: streaming chat** | SSE envelope, Hono `streamSSE`, React stream consumer | Streaming touches every layer — good architectural stress test. |
@@ -735,9 +739,10 @@ a plane, the app still does its job.
 | Datastore | SQLite (`better-sqlite3`) | Postgres; libSQL; PGlite | Household scale. FTS5 and `sqlite-vec` cover what pgvector/`tsvector` would have. Removes a container, a pool, and an upgrade path. |
 | Search | FTS5 | Postgres `tsvector` | Compiled into `better-sqlite3` already; nothing to install. |
 | Jobs | `jobs` table + `BEGIN IMMEDIATE` | BullMQ + Redis | No `SKIP LOCKED` needed with one worker; ~80 lines; no new container. |
+| Tenancy | `household_id` column + `forHousehold()` repositories | Database-per-tenant; add it later | Structural isolation without cross-database joins. Retrofitting the column under SQLite means a table recreate per table. |
 | Auth | better-auth in-app | Authelia/Authentik forward-auth | Keeps auth in the TypeScript being practised; can move to the proxy later. |
 | Lint/format | Biome | ESLint + Prettier | One tool, one config, far faster. |
-| Containers | Rootless Podman + Quadlet | Docker Compose; k3s | Rootless by default; systemd owns restarts, boot order, and logs. `podman-compose` is a shim — Quadlet is the native path. |
+| Containers | Docker Compose | Podman Quadlet; k3s | Compose is the portable interface — Podman runs the same file, so local dev can be rootless without the deployment target changing. |
 | Backups | Litestream continuous | Nightly dump | Recovery point in seconds. Keep a periodic `VACUUM INTO` snapshot alongside it. |
 | Remote access | Tailscale | Port-forward + DDNS | Nothing exposed to the internet. |
 | AI provider | Anthropic hosted | Local Ollama | Structured outputs and tool use are reliable, which is what these features depend on. |
@@ -762,10 +767,10 @@ a plane, the app still does its job.
 
 ## 11. Open questions
 
-1. **Household or single user?** Multiple users means the plan is shared and edits
-   collide. Worth deciding now — retrofitting a `household_id` onto every table
-   later is unpleasant. Recommendation: put the column in from phase 1 even if it
-   always holds one value.
+1. ~~Household or single user?~~ **Decided:** multi-tenant from phase 1 (§4.1).
+   The remaining sub-question is concurrent editing — two people dragging meals onto
+   the same week will clobber each other. Last-write-wins is fine to start; note it
+   rather than solve it, and revisit if it actually bites.
 2. **Metric or imperial, or both?** Affects the unit-conversion core and whether
    recipes store canonical units with display-time conversion (recommended) or store
    whatever was entered.
