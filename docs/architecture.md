@@ -85,8 +85,10 @@ this size. The ESLint plugin ecosystem is richer, but nothing here needs it.
 |---|---|---|
 | HTTP framework | Hono + `@hono/node-server` | 4.13 / 2.1 |
 | Route definition & validation | `@hono/zod-openapi` | 1.6 |
-| ORM / query builder | Drizzle ORM + drizzle-kit | 0.45 / 0.31 |
-| Database | PostgreSQL (`pgvector/pgvector:pg17`) | 17 |
+| ORM / query builder | Drizzle ORM (`sqlite-core`) + drizzle-kit | 0.45 / 0.31 |
+| Database | SQLite via `better-sqlite3` (bundles SQLite 3.53, FTS5, JSON) | 13.0 |
+| Vector search (phase 6) | `sqlite-vec` loaded as an extension | 0.1.9 |
+| Backup | Litestream (continuous replication) | 0.5.x |
 | Auth | better-auth | 1.7 |
 | Logging | pino | 10.x |
 | LLM | `@anthropic-ai/sdk` | 0.127 |
@@ -103,15 +105,46 @@ codebase is far too small to repay.
 **Why Drizzle over Prisma.** Drizzle's schema *is* TypeScript, and row types are
 inferred from it with no generate step — which means a schema change surfaces as a
 type error immediately rather than after `prisma generate`. It emits SQL you can
-read, which matters if part of the point is learning Postgres. Prisma 8 is a fine
-alternative with better tooling (Studio, a friendlier migration UX) and would be the
-right call if you wanted to lean on the tooling rather than the SQL.
+read, which matters if part of the point is learning SQL. The `sqlite-core` dialect
+is first-class, and `drizzle-kit` still generates migrations from the schema.
 
-**Why Postgres and nothing else.** One datastore covers relational data, full-text
-search (`tsvector`), vector similarity (pgvector), and the job queue (§6.3). Adding
-Redis or Elasticsearch to a household app would be learning infrastructure for its
-own sake — and the `pgvector/pgvector:pg17` image means the extension is there the
-day you want it, with no migration.
+**Why SQLite rather than Postgres.** The workload is a household: thousands of rows,
+a handful of writes a minute at peak. Against that, SQLite removes a container, a
+connection pool, a `pg_upgrade` path, and a backup strategy, and it makes the test
+suite an order of magnitude faster (§3.4). The capabilities that looked like
+Postgres-only turn out not to be: FTS5 covers recipe search, and `sqlite-vec`
+covers the phase-6 vector work.
+
+What we give up, and the mitigation in each case:
+
+| Lost | Mitigation |
+|---|---|
+| Rich column types (`timestamptz`, `jsonb`, arrays, enums, `uuid`) | Drizzle mode mappings + Zod at the boundary. The guarantee moves from the database to `packages/contracts` |
+| `SELECT … FOR UPDATE SKIP LOCKED` for the job queue | One worker process, `BEGIN IMMEDIATE` and a claim update (§6.4) |
+| Unrestricted `ALTER TABLE` | drizzle-kit emits table-recreate migrations. Review them; don't skim them |
+| pgvector | `sqlite-vec` — works, with one papercut (§6.4) |
+| Concurrent writers | WAL gives one writer + many readers. Irrelevant at this scale, with one rule attached (§6.4) |
+
+**Why Drizzle and not Kysely.** Kysely is closer in spirit to a minimal SQL wrapper
+— its `sql` tag and `sql.join` compose into fragments cleanly, and `kysely-codegen`
+derives types from the live schema. Drizzle wins here on migrations: `drizzle-kit`
+generates them from the TypeScript schema, where Kysely expects you to hand-write
+every one. Crucially, Drizzle's own `sql` template tag composes into fragments
+*identically*, so nothing is lost on that axis:
+
+```ts
+const whereAndOpt = (...frags: (SQL | undefined)[]) => {
+  const present = frags.filter(Boolean) as SQL[]
+  return present.length ? sql`where ${sql.join(present, sql` and `)}` : sql.empty()
+}
+const maxTime = (m?: number) => m == null ? undefined : sql`r.total_minutes <= ${m}`
+const hasTag  = (t?: string) => t == null ? undefined : sql`exists (
+  select 1 from recipe_tags rt where rt.recipe_id = r.id and rt.tag = ${t})`
+```
+
+Values bind as `?` placeholders, not interpolated text. Use the query builder for
+the routine 90%, and drop to `sql` fragments for the shopping-list aggregation and
+the FTS5 queries, where SQL reads better than any builder.
 
 **Why better-auth.** TypeScript-native, has a first-party Drizzle adapter, and
 handles sessions, email+password, and passkeys without a hosted dependency.
@@ -144,9 +177,19 @@ completion.
 | Layer | Tool | What it covers |
 |---|---|---|
 | Unit | Vitest 5 | Domain logic in `packages/core` — aggregation, unit conversion, date maths |
-| Integration | Vitest + Testcontainers 12 | API routes against a real ephemeral Postgres |
+| Integration | Vitest + in-memory SQLite | API routes against a real schema, fresh DB per test file |
 | Contract (AI) | Vitest + recorded fixtures | Our parsing/mapping of Claude responses (§6.4) |
+| Query contract | Vitest + in-memory SQLite | Every query executed and Zod-parsed — catches SQL/schema drift |
 | E2E | Playwright 1.63 | Two or three critical paths only: import a recipe, plan a week, generate a list |
+
+Dropping Postgres drops Testcontainers with it. A fresh in-memory SQLite database
+costs microseconds, so integration tests need no Docker, no daemon, and no fixture
+teardown — each test file gets its own database and throws it away.
+
+That cheapness buys a test worth writing explicitly: **execute every query in the
+codebase against a fresh schema and Zod-parse the result.** If a query stops
+returning a column its schema declares, the test fails. Seed the fixtures with nulls
+in every nullable column, or nullability drift slips through.
 
 ---
 
@@ -155,7 +198,7 @@ completion.
 This is the spine of the project. Each link is checked by the compiler.
 
 ```
-  Drizzle schema (packages/db/schema.ts)
+  Drizzle sqlite-core schema (packages/db/schema.ts)
         │  inferred row types, migrations via drizzle-kit
         ▼
   Zod domain + DTO schemas (packages/contracts)
@@ -206,17 +249,17 @@ meal-planner/
 │   │   │   ├── jobs/           # background worker + handlers
 │   │   │   ├── env.ts          # Zod-validated process.env, fails fast at boot
 │   │   │   └── app.ts          # exports AppType
-│   │   └── Dockerfile
 │   └── web/                    # Vite + React SPA (PWA)
 ├── packages/
 │   ├── contracts/              # Zod schemas + inferred types. Depends on nothing.
 │   ├── core/                   # Pure domain logic. Depends only on contracts.
 │   ├── db/                     # Drizzle schema, migrations, client factory
 │   └── ai/                     # Anthropic client, prompts, tools, capabilities
-├── docker/
-│   ├── compose.yaml
-│   ├── compose.dev.yaml        # Postgres only, for local dev
-│   └── Caddyfile
+├── deploy/
+│   ├── quadlet/                # .container / .network / .volume units
+│   ├── Containerfile           # api image (multi-stage)
+│   ├── Caddyfile
+│   └── litestream.yml
 ├── docs/
 │   └── architecture.md         # this file
 └── turbo.json
@@ -359,18 +402,32 @@ shopping list — the thing you actually need in a shop — must have no AI in i
 critical path at all.
 
 **Background jobs.** URL import and week planning take seconds to tens of seconds;
-they shouldn't hold an HTTP request open. A `jobs` table in Postgres with
-`SELECT ... FOR UPDATE SKIP LOCKED` and a worker loop in the API process is about
-80 lines and has no new infrastructure. If you specifically want to learn queues,
-BullMQ + Redis is the upgrade — but it adds a container and a failure mode for
-capacity this app will never need.
+they shouldn't hold an HTTP request open. A `jobs` table, a `BEGIN IMMEDIATE`
+transaction to claim the next row, and a worker loop in the API process is about 80
+lines and adds no infrastructure. SQLite has no `SKIP LOCKED`, but with a single
+worker there is nothing to skip — the immediate transaction is the whole lock.
+
+**Never hold a write transaction open across an `await` on the Anthropic API.** A
+20-second model call inside a transaction blocks every other write in the process.
+Call Claude first, *then* open a transaction and write the result. Pleasantly,
+`better-sqlite3`'s synchronous API makes this structurally impossible: you cannot
+`await` inside `db.transaction()`, because it isn't async. The footgun is designed
+out — but the rule still applies to any hand-rolled `BEGIN`/`COMMIT` pair.
+
+**Search.** SQLite's FTS5 covers recipe search: an external-content virtual table
+over title, ingredients, and tags, kept in sync by triggers. `better-sqlite3` bundles
+SQLite 3.53 with FTS5 and JSON compiled in, so there is nothing to install.
 
 **Semantic search (later).** Anthropic has no embeddings endpoint, so this needs a
-separate model. Start with Postgres full-text search — `tsvector` over title,
-ingredients, and tags is genuinely good and costs nothing. If you later want *"that
-soup with the coconut milk"* to work, add pgvector with a local embedding model
-(`transformers.js` running `bge-small` in-process) rather than a second API
-dependency. The image already has the extension.
+separate model. Do FTS5 first — it is genuinely good and costs nothing. If you later
+want *"that soup with the coconut milk"* to work, add `sqlite-vec` (loaded at
+connection time via `loadExtension`) with a local embedding model — `transformers.js`
+running `bge-small` in-process — rather than a second API dependency.
+
+One verified papercut: `sqlite-vec` 0.1.9 rejects a `rowid` bound as a plain JS
+number from `better-sqlite3` 13 (`Only integers are allows for primary key values`).
+Bind a `BigInt` instead — `stmt.run(1n, vec)` works. Worth a comment in the code, or
+you will lose an evening to it.
 
 ---
 
@@ -390,8 +447,14 @@ Small app, but the habits are the point.
   with other services on the same network.
 - **Model output is untrusted input.** Tool arguments get validated and re-authorised
   server-side. Extracted recipe text gets rendered as text, never as HTML.
-- **Secrets.** A `.env` on the host, gitignored, mode `600`. Docker secrets or SOPS
-  + age is the next step when you want the config in git.
+- **Rootless containers.** The API runs as an unprivileged user with `DropCapability=ALL`
+  and `NoNewPrivileges=true`, so compromising the Node process does not hand over the
+  host. This pairs directly with the SSRF surface above: the two highest-risk pieces
+  of this app are an outbound fetcher and an LLM with tool access, and rootless is the
+  cheapest meaningful containment for both.
+- **Secrets.** An env file on the host, gitignored, mode `600`, referenced by
+  `EnvironmentFile=`. Podman secrets or SOPS + age is the next step when you want the
+  config in git.
 
 ---
 
@@ -399,87 +462,242 @@ Small app, but the habits are the point.
 
 ### 8.1 Topology
 
-Single host, Docker Compose, four services:
+Single host, **rootless Podman**, units managed by systemd via Quadlet. SQLite
+removed the database container, so there are two:
 
 ```
               ┌──────────────────────────────────────────┐
   LAN ───────►│ caddy      :443  TLS, static SPA, /api/* │
   Tailscale   └────────────┬─────────────────────────────┘
-                           │ /api/* → api:3000
-              ┌────────────▼──────────┐
-              │ api        Node 24    │──► api.anthropic.com
-              │            Hono       │
-              └────────────┬──────────┘
-                           │
-              ┌────────────▼──────────┐   ┌──────────────┐
-              │ db   pgvector/pg17    │◄──│ backup       │
-              │      named volume     │   │ nightly dump │
-              └───────────────────────┘   └──────────────┘
+                           │ /api/* → api:3000  (podman network)
+              ┌────────────▼─────────────────────────────┐
+              │ api    Node 24 + Hono                    │──► api.anthropic.com
+              │        litestream -exec "node ..."       │──► off-host replica
+              │                                          │
+              │        /data/app.db  ◄── named volume ───┼──► real fs, NOT overlay
+              └──────────────────────────────────────────┘
 ```
 
-Caddy serves the built SPA as static files directly and reverse-proxies `/api/*` —
-no separate web container, and no CORS, because everything is same-origin.
+Caddy serves the built SPA as static files and reverse-proxies `/api/*` — no
+separate web container, and no CORS, because everything is same-origin.
 
-### 8.2 Images
+**The one rule that matters here: the SQLite file must never live on the container's
+overlay filesystem.** SQLite's WAL mode depends on POSIX advisory locking and
+coherent mmap of the `-shm` file, and overlay and network filesystems
+[break both, with corruption as the symptom rather than an error](https://sqlite.org/howtocorrupt.html).
+Put it on a named volume or a bind mount — both are real host filesystem — and never
+in a path that falls through to the image's writable layer. This was a non-issue with
+Postgres and is now the single most important deployment detail.
 
-Multi-stage Dockerfile for the API:
+### 8.2 Why Podman, and what actually changes
+
+Rootless is the point: the container runs as your unprivileged user, so a compromise
+of the Node process is not a path to root on the homelab host. Combined with the
+existing SSRF surface on recipe import (§7), that is a meaningful reduction. systemd
+integration via Quadlet is the second win — restart policy, boot ordering, and log
+collection come from the init system you already run rather than a second daemon.
+
+Four things genuinely differ from Docker, and each needs a decision:
+
+**Privileged ports.** A rootless container cannot bind 80/443. Pick one:
+`sysctl net.ipv4.ip_unprivileged_port_start=80` (simplest, and it is a
+[documented, supported setting](https://github.com/containers/podman/blob/main/rootless.md));
+a firewall redirect from 443 to an unprivileged port; or bind Caddy high and let
+Tailscale Serve terminate TLS. Given §8.5 leans on Tailscale anyway, the sysctl is
+the least machinery.
+
+**Volume ownership.** Rootless Podman maps container UIDs into your subuid range, so
+files a container writes appear on the host owned by a high-numbered UID. For a named
+volume this is invisible and fine. For a bind mount you want `--userns=keep-id` (or
+`UserNS=keep-id` in the unit) so the file is owned by you and `litestream restore`
+works without `sudo`. Use a named volume for `app.db` and bind mounts only for
+read-only config.
+
+**SELinux.** On Fedora/RHEL, bind mounts need a `:Z` (private) or `:z` (shared) label
+suffix or the container gets permission denied on a path that looks perfectly
+readable. Named volumes are labelled automatically.
+
+**Compose is not the interface.** `podman-compose` exists and mostly works, and
+Podman can expose a Docker-compatible socket for real `docker compose`. Both are
+compatibility shims. Quadlet is the native path and is what
+[Podman's own docs now recommend](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
+— `podman generate systemd` is deprecated in its favour.
+
+### 8.3 Quadlet units
+
+Rootless units live in `~/.config/containers/systemd/`. systemd generates a real
+service from each at daemon-reload.
+
+```ini
+# ~/.config/containers/systemd/meal-planner.network
+[Network]
+NetworkName=meal-planner
+```
+
+```ini
+# ~/.config/containers/systemd/meal-planner-data.volume
+[Volume]
+VolumeName=meal-planner-data
+```
+
+```ini
+# ~/.config/containers/systemd/meal-planner-api.container
+[Unit]
+Description=Meal Planner API
+After=network-online.target
+
+[Container]
+Image=ghcr.io/laurinnr/meal-planner-api:latest
+AutoUpdate=registry
+Network=meal-planner.network
+Volume=meal-planner-data.volume:/data
+EnvironmentFile=%h/.config/meal-planner/api.env
+Environment=DATABASE_PATH=/data/app.db
+HealthCmd=wget -qO- http://localhost:3000/health || exit 1
+HealthInterval=30s
+HealthStartPeriod=10s
+NoNewPrivileges=true
+DropCapability=ALL
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/containers/systemd/meal-planner-caddy.container
+[Unit]
+Description=Caddy
+After=network-online.target
+
+[Container]
+Image=docker.io/library/caddy:2-alpine
+AutoUpdate=registry
+Network=meal-planner.network
+PublishPort=80:80
+PublishPort=443:443
+Volume=%h/.config/meal-planner/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+Volume=caddy-data.volume:/data
+Volume=meal-planner-web:/srv:ro
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+
+```sh
+loginctl enable-linger "$USER"          # units start at boot, survive logout
+systemctl --user daemon-reload
+systemctl --user start meal-planner-api meal-planner-caddy
+systemctl --user enable --now podman-auto-update.timer   # honours AutoUpdate=registry
+```
+
+`loginctl enable-linger` is the step everyone forgets — without it the units stop
+when you log out and never come back after a reboot.
+
+> These units are written from the Quadlet reference, not executed — Podman was not
+> available where this was drafted. Expect to iterate on the `HealthCmd` quoting and
+> the exact `Volume=` spellings on first run; `systemctl --user status` and
+> `journalctl --user -u meal-planner-api` will tell you which.
+
+### 8.4 Images
+
+Multi-stage build for the API — the Containerfile is a Dockerfile, byte for byte:
 
 1. **deps** — `pnpm fetch` against the lockfile only, so the layer caches until a
    dependency actually changes.
-2. **build** — install, `tsc`/bundle, then `pnpm deploy --filter=api --prod` to
-   produce a pruned `node_modules` without the workspace's dev tree.
-3. **runtime** — `node:24-alpine`, non-root user, only the pruned output copied in,
-   `HEALTHCHECK` hitting `/health`.
+2. **build** — install, compile, then `pnpm deploy --filter=api --prod` for a pruned
+   `node_modules` without the workspace dev tree.
+3. **runtime** — `node:24-alpine`, non-root user, pruned output plus the Litestream
+   binary.
 
-The SPA is a separate build stage whose `dist/` is copied into the Caddy image.
+`better-sqlite3` is a native module: build it in the same base image the runtime
+stage uses, or the prebuilt binary will not match the runtime's libc. `node:24-alpine`
+is musl — if prebuilds give trouble, `node:24-slim` (glibc) is the boring fix.
 
-### 8.3 Config, migrations, backups
+Entrypoint wraps the app in Litestream so replication and process lifetime are the
+same thing:
 
-- **Config:** env vars only, `.env` on the host. Nothing environment-specific baked
-  into an image.
+```
+litestream replicate -exec "node dist/main.js"
+```
+
+The SPA is a separate build stage; its `dist/` is published into a volume Caddy
+serves read-only.
+
+### 8.5 Config, migrations, backups
+
+- **Config:** env vars only, via `EnvironmentFile=`. Mode `600`, gitignored, nothing
+  environment-specific baked into an image.
 - **Migrations:** drizzle-kit generates SQL files, committed to git. They run as an
-  explicit step (a one-shot Compose service or `docker compose exec`), **not**
-  automatically on API boot — auto-migrate on boot is how you find out about a bad
-  migration during a restart loop.
-- **Backups:** nightly `pg_dump` to a mounted host path, 14 days retained, and that
-  path included in whatever backs up the homelab. A backup you have never restored is
-  a hypothesis — restore one into a scratch container once and confirm the row counts.
+  explicit step — a `Type=oneshot` unit or `podman exec` — **not** on API boot.
+  Auto-migrate on boot is how you discover a bad migration during a restart loop.
+  With SQLite this matters more than usual: drizzle-kit emits table-recreate
+  migrations for column changes, so read them rather than skimming them.
+- **Backups:** Litestream replicates continuously to a second physical disk or an
+  S3-compatible target, which is a strictly better story than nightly `pg_dump` — the
+  recovery point is seconds, not a day. Two caveats: Litestream v0.5 rewrote its
+  storage format to LTX and
+  [the v0.3 → v0.5 migration path has open bugs](https://github.com/benbjohnson/litestream/issues/1512),
+  so start on v0.5 and don't plan to upgrade across it; and v0.5 dropped age
+  encryption. Also keep a periodic `VACUUM INTO` snapshot — a single consistent file
+  you can copy anywhere is worth having when the replica itself is what went wrong.
+  **Restore one into a scratch container and check the row counts.** A backup you have
+  never restored is a hypothesis.
 
-### 8.4 Access from outside the LAN
+### 8.6 Access from outside the LAN
 
 A shopping list is used in a shop, which is not on your LAN. This is a real
 constraint, not a detail, and it has two answers:
 
 - **Tailscale** (recommended). The host joins your tailnet; the phone reaches it from
-  anywhere with nothing exposed to the internet. With Tailscale's HTTPS certs you
-  also get a trusted certificate without a DNS-01 dance.
+  anywhere with nothing exposed to the internet. With Tailscale's HTTPS certs you also
+  get a trusted certificate without a DNS-01 dance — and `tailscale serve` can
+  terminate TLS, which sidesteps the rootless privileged-port problem in §8.2
+  entirely.
 - **Offline-first PWA.** Installable, caches the current shopping list, works with no
-  connectivity at all. Worth doing anyway — supermarket signal is bad — but it means
-  thinking about local writes and sync, which is a real project of its own. Phase it
-  as read-only caching first: the list renders offline, ticking items off syncs when
-  you're back.
+  connectivity at all. Worth doing anyway — supermarket signal is bad — but local
+  writes and sync are a real project. Phase it as read-only caching first: the list
+  renders offline, ticking items off syncs when you're back.
 
 Do Tailscale first; treat offline write sync as a stretch goal.
 
-### 8.5 CI/CD
+### 8.7 CI/CD
 
-GitHub Actions on push: Biome → `tsc --noEmit` → Vitest (unit + Testcontainers
-integration) → build images → push to GHCR.
+GitHub Actions on push: Biome → `tsc --noEmit` → Vitest → build image → push to GHCR.
 
-Deployment is a pull, not a push: `docker compose pull && docker compose up -d` on
-the host, run by hand or by a small `make deploy` over SSH. Watchtower automates it
-if you want, but manual deploys are honestly fine for a household app, and knowing
-exactly when a deploy happened makes debugging easier.
+GitHub's runners ship Docker, not Podman, and **OCI images are interchangeable** —
+so build with Docker Buildx in CI and run with Podman on the host. That is the
+pragmatic split and it costs nothing. If you'd rather keep the toolchain uniform,
+`redhat-actions/buildah-build` builds with Buildah on the same runners.
 
-### 8.6 Observability
+Deployment is a pull, not a push. Either `podman auto-update` on its timer (§8.3,
+driven by the `AutoUpdate=registry` label), or a `make deploy` that SSHes in and runs
+`systemctl --user restart`. Manual deploys are honestly fine for a household app, and
+knowing exactly when one happened makes debugging easier.
+
+Note that local development needs no containers at all now — SQLite is a file and
+the API is a Node process. `pnpm dev` is the whole story, which is a real improvement
+over waiting for a Postgres container to become healthy.
+
+### 8.8 Observability
 
 Start small and add when something actually hurts:
 
-- pino structured JSON logs to stdout, read via `docker compose logs`.
-- `/health` (process alive) and `/ready` (Postgres reachable), wired to Compose
-  healthchecks.
+- pino structured JSON logs to stdout. Under Quadlet these land in the journal:
+  `journalctl --user -u meal-planner-api -f`, with `--since`, `--grep` and
+  `-o json` for free. This is a genuine upgrade over `docker compose logs`.
+- `/health` (process alive) and `/ready` (can open and query the database), wired to
+  `HealthCmd=`. `systemctl --user status` then shows real health, and a failing
+  healthcheck is visible to the init system rather than only to a `podman ps` column.
 - The `ai_calls` table doubles as AI observability from day one.
-- OpenTelemetry + a Grafana/Loki/Tempo stack is the natural next step, and a good
+- OpenTelemetry plus a Grafana/Loki/Tempo stack is the natural next step and a good
   standalone learning project — but adding it before there's traffic to look at means
   maintaining dashboards nobody reads.
 
@@ -493,13 +711,13 @@ only once there's data for it to work on.
 
 | Phase | Deliverable | Why here |
 |---|---|---|
-| **0. Walking skeleton** | Monorepo, CI, Compose, Caddy, Postgres, `/health`, one typed route rendered in the SPA — **deployed to the homelab** | Deploy on day one. Every later phase is then a small delta, and you never face a big-bang first deploy. |
+| **0. Walking skeleton** | Monorepo, CI, Quadlet units, Caddy, SQLite, `/health`, one typed route rendered in the SPA — **deployed to the homelab** | Deploy on day one. Every later phase is then a small delta, and you never face a big-bang first deploy. |
 | **1. Recipes** | Full CRUD, typed end-to-end, migrations, integration tests | Proves the type chain and gives the AI features something to write into. |
 | **2. Plan & shopping list** | Week grid, aggregation, unit conversion, store sections | The genuinely interesting domain logic. Heavy unit tests, no AI, no network. |
 | **3. AI: recipe import** | JSON-LD fast path → Claude structured-output fallback, photo import, `ai_calls` logging | First AI feature, highest value, and it's the one that fills the database. |
 | **4. AI: streaming chat** | SSE envelope, Hono `streamSSE`, React stream consumer | Streaming touches every layer — good architectural stress test. |
 | **5. AI: week planning agent** | Tool runner, four tools, draft-and-confirm UX, budget caps | Needs phases 1–3 in place to have anything to reason over. |
-| **6. Polish** | PWA + Tailscale, pgvector semantic search, cost dashboard, Playwright E2E | The "actually use it" phase. |
+| **6. Polish** | PWA + Tailscale, `sqlite-vec` semantic search, cost dashboard, Playwright E2E | The "actually use it" phase. |
 
 Phases 0–2 are a working meal planner with no AI in it. That is intentional: if the
 Anthropic API is down, or you run out of credits, or you just want to add a recipe on
@@ -513,12 +731,14 @@ a plane, the app still does its job.
 |---|---|---|---|
 | App shape | Hono API + Vite SPA, monorepo | Next.js fullstack | Keeps a real server-side boundary; the backend is the thing being practised. |
 | API contract | Hono `hc` + zod-openapi | tRPC | Same end-to-end types, but real REST semantics and a free OpenAPI doc. tRPC couples client to server more tightly. |
-| ORM | Drizzle | Prisma | Types without codegen; readable SQL; smaller runtime. |
-| Datastore | Postgres only | + Redis / Elasticsearch | One database covers relational, FTS, vectors, and jobs at this scale. |
-| Jobs | Postgres `SKIP LOCKED` | BullMQ + Redis | No new container; ~80 lines; sufficient for household volume. |
+| ORM | Drizzle `sqlite-core` | Kysely | Kysely is closer to raw SQL, but Drizzle generates migrations and its `sql` fragments compose just as well. |
+| Datastore | SQLite (`better-sqlite3`) | Postgres; libSQL; PGlite | Household scale. FTS5 and `sqlite-vec` cover what pgvector/`tsvector` would have. Removes a container, a pool, and an upgrade path. |
+| Search | FTS5 | Postgres `tsvector` | Compiled into `better-sqlite3` already; nothing to install. |
+| Jobs | `jobs` table + `BEGIN IMMEDIATE` | BullMQ + Redis | No `SKIP LOCKED` needed with one worker; ~80 lines; no new container. |
 | Auth | better-auth in-app | Authelia/Authentik forward-auth | Keeps auth in the TypeScript being practised; can move to the proxy later. |
 | Lint/format | Biome | ESLint + Prettier | One tool, one config, far faster. |
-| Deploy | Docker Compose | k3s | Debuggable, sufficient, and doesn't spend the project's budget on YAML. |
+| Containers | Rootless Podman + Quadlet | Docker Compose; k3s | Rootless by default; systemd owns restarts, boot order, and logs. `podman-compose` is a shim — Quadlet is the native path. |
+| Backups | Litestream continuous | Nightly dump | Recovery point in seconds. Keep a periodic `VACUUM INTO` snapshot alongside it. |
 | Remote access | Tailscale | Port-forward + DDNS | Nothing exposed to the internet. |
 | AI provider | Anthropic hosted | Local Ollama | Structured outputs and tool use are reliable, which is what these features depend on. |
 
@@ -528,9 +748,13 @@ a plane, the app still does its job.
   capability functions are the entire surface; swapping the implementation for a
   local model means rewriting one package, not the app. Structured extraction would
   need the most rework — small local models are much weaker at schema adherence.
-- **If it outgrew one host:** the API is already stateless (sessions in Postgres, no
-  local disk), so the move to k3s is packaging, not re-architecture. That's the main
-  reason to keep it 12-factor now even though nothing requires it.
+- **If it outgrew one host:** SQLite makes the API stateful — the database is a file
+  on a volume, so the app is pinned to one node. That is a deliberate trade, not an
+  oversight: horizontal scale is an explicit non-goal (§1). The migration path, if it
+  ever mattered, is SQLite → Postgres, and it is a real one — Drizzle's `sqlite-core`
+  and `pg-core` are different dialects, so `packages/db` gets rewritten. Keeping every
+  query behind repository functions in that package is what bounds the blast radius,
+  and is the reason the dependency rule in §5 is worth enforcing.
 - **If route count made `hc` inference slow:** switch to `openapi-typescript` +
   `openapi-fetch` against the OpenAPI doc the server already emits. Contained change.
 
