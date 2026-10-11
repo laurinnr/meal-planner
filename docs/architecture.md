@@ -5,7 +5,7 @@ local network. This document is the design brief: what we're building, what we'r
 building it with, and why.
 
 **Status:** draft v1 — pre-implementation
-**Last reviewed:** 2026-09-22
+**Last reviewed:** 2026-10-11
 
 ---
 
@@ -25,7 +25,7 @@ This project exists to practise four things, in roughly this order of emphasis:
 
 ### Non-goals
 
-- Multi-tenancy, horizontal scale, or high availability. This serves a household.
+- Horizontal scale or high availability. This serves a handful of households (§4.1).
 - Public internet exposure. Access is via the LAN or a private tunnel (§8.4).
 - Mobile-native apps. An installable PWA covers the phone use case.
 
@@ -40,17 +40,28 @@ Architecture without a domain is hand-waving, so here is the thing being built.
 | **Household** | The tenant. Every row below belongs to exactly one. |
 | **User** | A person. Belongs to one or more households via `HouseholdMember` (user_id, household_id, role). |
 | **Recipe** | Title, source URL, servings, prep/cook time, steps, tags. Has many `RecipeIngredient`. |
-| **Ingredient** | Canonical food item ("plum tomato"). Deduplicated across recipes. |
+| **Ingredient** | A household's food vocabulary ("plum tomato"), with aliases and a store section. Deduplicated within the household; seeded from a starter catalogue. |
 | **RecipeIngredient** | Join row: quantity, unit, preparation note ("finely chopped"), optional flag. |
 | **MealPlan** | A week. Has many `PlannedMeal`. |
 | **PlannedMeal** | (date, slot: breakfast/lunch/dinner, recipe, servings). |
-| **ShoppingList** | Derived from a `MealPlan`, minus pantry. Grouped by store section. |
-| **PantryItem** | What's already in the house, with quantity and optional expiry. |
+| **ShoppingList** | Derived from a `MealPlan`, grouped by store section. Has many `ShoppingListItem`, each with a checked flag: tick off what's already at home, then what's in the basket. |
 | **AiCall** | Audit row for every Claude request — household, feature, model, tokens, cost, latency. |
 
-`Ingredient` is the one table that is deliberately *not* tenant-scoped: "plum tomato"
-is a shared vocabulary, and duplicating it per household buys nothing. Everything else
-carries a `household_id`.
+**There are no shared tables.** Every row, `Ingredient` included, carries a
+`household_id`. A shared ingredient vocabulary looks free but isn't: households will
+add their own items, and then someone has to decide who may rename or merge a shared
+row, and per-household attributes (which store section, what *you* call it) need an
+override table anyway. Scoping it like everything else keeps `forHousehold()` and the
+isolation test (§4.1) free of exceptions. A new household gets a starter catalogue
+copied in from `packages/core`, so nobody starts from an empty list. Recipe import
+maps extracted names onto the household's catalogue by normalised name and aliases,
+creating rows for misses. The cost is that sharing a recipe across households maps
+ingredients by name on copy, which is acceptable for a rare action.
+
+**There is no pantry.** Keeping household stock accurate is a chore nobody keeps up,
+and an inaccurate pantry is worse than none. The shopping list is generated in full,
+and the user checks off what's already at home. Check state is persisted, so
+regenerating the list after a plan change keeps the ticks on lines that still exist.
 
 The interesting logic — the part worth writing tests for before writing any UI — is
 **shopping list aggregation**: merging `2 cloves garlic` + `1 tbsp minced garlic` +
@@ -71,7 +82,7 @@ Versions are what's current as of 2026-09-22 and are worth pinning at scaffold t
 | Concern | Choice | Version |
 |---|---|---|
 | Language | TypeScript, `strict: true` + `noUncheckedIndexedAccess` | 7.0 |
-| Runtime | Node.js (current LTS line) | 24.x |
+| Runtime | Node.js (LTS from late October 2026) | 26.x |
 | Package manager | pnpm workspaces | 12.x |
 | Task orchestration | Turborepo | 2.11 |
 | Lint + format | Biome (one tool, no ESLint/Prettier split) | 2.5 |
@@ -474,8 +485,7 @@ Use `client.beta.messages.toolRunner` with `betaZodTool`-defined tools:
 
 | Tool | Purpose |
 |---|---|
-| `search_recipes` | Filter by tag, max time, ingredient, exclusions |
-| `get_pantry` | What needs using up, and by when |
+| `search_recipes` | Filter by tag, max time, ingredient, exclusions ("use up the courgettes" is an ingredient filter, not a pantry lookup) |
 | `get_recent_meals` | Avoid repetition |
 | `propose_plan` | Terminal tool — validated `MealPlanDraft`, ends the loop |
 
@@ -652,7 +662,7 @@ services:
   Tailscale   └────────────┬─────────────────────────────┘
                            │ /api/* → api:3000
               ┌────────────▼─────────────────────────────┐
-              │ api    Node 24 + Hono                    │──► api.anthropic.com
+              │ api    Node 26 + Hono                    │──► api.anthropic.com
               │        litestream -exec "node ..."       │──► off-host replica
               │                                          │
               │        /data/app.db  ◄── named volume ───┼──► real fs, NOT overlay
@@ -699,12 +709,12 @@ Multi-stage Dockerfile for the API:
    dependency actually changes.
 2. **build** — install, compile, then `pnpm deploy --filter=api --prod` for a pruned
    `node_modules` without the workspace dev tree.
-3. **runtime** — `node:24-alpine`, non-root user, pruned output plus the Litestream
+3. **runtime** — `node:26-alpine`, non-root user, pruned output plus the Litestream
    binary, `HEALTHCHECK` hitting `/health`.
 
 `better-sqlite3` is a native module: build it in the same base image the runtime stage
-uses, or the prebuilt binary will not match the runtime's libc. `node:24-alpine` is
-musl — if prebuilds give trouble, `node:24-slim` (glibc) is the boring fix.
+uses, or the prebuilt binary will not match the runtime's libc. `node:26-alpine` is
+musl — if prebuilds give trouble, `node:26-slim` (glibc) is the boring fix.
 
 Entrypoint wraps the app in Litestream so replication and process lifetime are the
 same thing:
@@ -790,7 +800,7 @@ only once there's data for it to work on.
 | **2. Plan & shopping list** | Week grid, aggregation, unit conversion, store sections | The genuinely interesting domain logic. Heavy unit tests, no AI, no network. |
 | **3. AI: recipe import** | JSON-LD fast path → Claude structured-output fallback, photo import, `ai_calls` logging. Effect enters here, in `packages/ai` only | First AI feature, highest value, and it's the one that fills the database. Effect lands with the first code that needs retries and timeouts, not before. |
 | **4. AI: streaming chat** | SSE envelope, Hono `streamSSE`, React stream consumer | Streaming touches every layer — good architectural stress test. |
-| **5. AI: week planning agent** | Tool runner, four tools, draft-and-confirm UX, budget caps | Needs phases 1–3 in place to have anything to reason over. |
+| **5. AI: week planning agent** | Tool runner, three tools, draft-and-confirm UX, budget caps | Needs phases 1–3 in place to have anything to reason over. |
 | **6. Polish** | PWA + Tailscale, `sqlite-vec` semantic search, cost dashboard, Playwright E2E | The "actually use it" phase. |
 
 Phases 0–2 are a working meal planner with no AI in it. That is intentional: if the
@@ -851,7 +861,5 @@ a plane, the app still does its job.
 3. **Does Effect widen past `packages/ai`?** Deliberately deferred to after phase 5
    (§6.5). The `R`-channel tenancy argument is good; the cost is replacing the Hono
    and Drizzle integration layers. Decide with experience, not in advance.
-4. **How far does the pantry go?** Full inventory tracking with depletion is a
-   commitment to keeping it accurate, and an inaccurate pantry is worse than none.
-   A lighter "things to use up" list gets most of the value into the planning agent
-   for a fraction of the effort.
+4. ~~How far does the pantry go?~~ **Decided:** no pantry. The shopping list is
+   checked off against what's at home (§2).
