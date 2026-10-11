@@ -34,3 +34,8 @@ packages/ai          Claude capabilities: extract, chat, plan (Effect; exports P
 
 See [docs/architecture.md](docs/architecture.md) for the reasoning behind each
 choice, the build order, and the open questions.
+
+## License
+
+[AGPL-3.0](LICENSE). If you run a modified version for other people over a
+network, you must offer them its source code.
