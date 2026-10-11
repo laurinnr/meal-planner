@@ -6,3 +6,5 @@ dist/
 .turbo/
 *.log
 .DS_Store
+
+.idea
