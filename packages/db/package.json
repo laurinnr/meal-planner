@@ -6,13 +6,19 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node src/bin/migrate.ts"
   },
   "dependencies": {
     "@meal-planner/contracts": "workspace:*",
-    "@meal-planner/core": "workspace:*"
+    "@meal-planner/core": "workspace:*",
+    "better-sqlite3": "^13.0.3",
+    "drizzle-orm": "^0.45.4"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0"
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.0.0",
+    "drizzle-kit": "^0.31.11"
   }
 }

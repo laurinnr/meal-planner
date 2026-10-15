@@ -5,3 +5,8 @@ packages:
 # Refuse dependency versions published less than 7 days ago (in minutes).
 # Most malicious releases are caught and yanked within that window.
 minimumReleaseAge: 10080
+
+# Install scripts are opt-in. esbuild (via drizzle-kit) ships its binary as an
+# optional platform package, so its postinstall isn't needed.
+allowBuilds:
+  esbuild: false

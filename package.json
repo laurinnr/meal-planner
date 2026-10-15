@@ -12,7 +12,9 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "lint": "biome check .",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "db:generate": "pnpm --filter @meal-planner/db db:generate",
+    "db:migrate": "pnpm --filter @meal-planner/db db:migrate"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",

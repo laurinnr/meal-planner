@@ -36,6 +36,8 @@ pnpm turbo typecheck lint
 | `pnpm build` / `typecheck` / `test` | Run that Turborepo task across every workspace package |
 | `pnpm lint` | Biome lint + format check over the whole repo |
 | `pnpm format` | Apply Biome fixes and formatting |
+| `pnpm db:generate` | Generate a SQL migration from `packages/db/src/schema.ts` — read it before committing |
+| `pnpm db:migrate` | Apply pending migrations to `DATABASE_PATH` (default `data/meal-planner.db`). Never runs on API boot |
 
 pnpm refuses dependency versions published less than 7 days ago
 (`minimumReleaseAge` in `pnpm-workspace.yaml`).
