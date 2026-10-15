@@ -6,13 +6,20 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "dev": "node --watch --env-file-if-exists=../../.env src/main.ts",
+    "start": "node src/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.4",
+    "@hono/zod-openapi": "^1.6.3",
+    "@meal-planner/ai": "workspace:*",
     "@meal-planner/contracts": "workspace:*",
     "@meal-planner/core": "workspace:*",
     "@meal-planner/db": "workspace:*",
-    "@meal-planner/ai": "workspace:*"
+    "hono": "^4.13.13",
+    "pino": "^10.4.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^26.0.0"

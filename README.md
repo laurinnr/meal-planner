@@ -29,6 +29,10 @@ Toolchain versions are pinned in `mise.toml` (Node 26, pnpm 12).
 mise install          # or install Node 26 and pnpm 12 yourself
 pnpm install
 pnpm turbo typecheck lint
+
+cp .env.example .env  # local config; see the comments in it
+pnpm db:migrate       # create data/meal-planner.db
+pnpm dev              # API on http://127.0.0.1:3000 (/health, /ready, /openapi.json)
 ```
 
 | Command | What it does |
