@@ -176,6 +176,72 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
+  apps/api:
+    dependencies:
+      '@meal-planner/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
+      '@meal-planner/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@meal-planner/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@meal-planner/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.4
+
+  apps/web:
+    dependencies:
+      '@meal-planner/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@meal-planner/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@meal-planner/api':
+        specifier: workspace:*
+        version: link:../api
+
+  packages/ai:
+    dependencies:
+      '@meal-planner/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@meal-planner/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.4
+
+  packages/contracts: {}
+
+  packages/core:
+    dependencies:
+      '@meal-planner/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
+  packages/db:
+    dependencies:
+      '@meal-planner/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@meal-planner/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.6.4
+
 packages:
 
   '@biomejs/biome@2.5.15':
@@ -264,6 +330,9 @@ packages:
     resolution: {integrity: sha512-88Xv2f7SLGVJ68lRRx8o375dKmnZYNdDtvlKcPA0kZpcF93eAQd8l96BKQ0/AMHG0bMJA0Z5QqoqtetxzNsC+g==}
     cpu: [arm64]
     os: [win32]
+
+  '@types/node@26.6.4':
+    resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -394,6 +463,9 @@ packages:
     engines: {node: '>=16.20.0'}
     hasBin: true
 
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
+
 snapshots:
 
   '@biomejs/biome@2.5.15':
@@ -448,6 +520,10 @@ snapshots:
 
   '@turbo/windows-arm64@2.11.7':
     optional: true
+
+  '@types/node@26.6.4':
+    dependencies:
+      undici-types: 8.9.0
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -540,3 +616,5 @@ snapshots:
       '@typescript/typescript-sunos-x64': 7.0.2
       '@typescript/typescript-win32-arm64': 7.0.2
       '@typescript/typescript-win32-x64': 7.0.2
+
+  undici-types@8.9.0: {}

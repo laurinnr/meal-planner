@@ -18,7 +18,10 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "preset": "recommended"
+      "preset": "recommended",
+      "correctness": {
+        "noUndeclaredDependencies": "error"
+      }
     }
   },
   "javascript": {
@@ -33,5 +36,181 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/contracts/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@meal-planner/core", "@meal-planner/core/**"],
+                    "message": "packages/contracts must not depend on @meal-planner/core. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/db", "@meal-planner/db/**"],
+                    "message": "packages/contracts must not depend on @meal-planner/db. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/ai", "@meal-planner/ai/**"],
+                    "message": "packages/contracts must not depend on @meal-planner/ai. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/api", "@meal-planner/api/**"],
+                    "message": "packages/contracts must not depend on @meal-planner/api. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/web", "@meal-planner/web/**"],
+                    "message": "packages/contracts must not depend on @meal-planner/web. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/core/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@meal-planner/db", "@meal-planner/db/**"],
+                    "message": "packages/core must not depend on @meal-planner/db. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/ai", "@meal-planner/ai/**"],
+                    "message": "packages/core must not depend on @meal-planner/ai. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/api", "@meal-planner/api/**"],
+                    "message": "packages/core must not depend on @meal-planner/api. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/web", "@meal-planner/web/**"],
+                    "message": "packages/core must not depend on @meal-planner/web. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/db/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@meal-planner/ai", "@meal-planner/ai/**"],
+                    "message": "packages/db must not depend on @meal-planner/ai. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/api", "@meal-planner/api/**"],
+                    "message": "packages/db must not depend on @meal-planner/api. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/web", "@meal-planner/web/**"],
+                    "message": "packages/db must not depend on @meal-planner/web. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/ai/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@meal-planner/db", "@meal-planner/db/**"],
+                    "message": "packages/ai must not depend on @meal-planner/db. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/api", "@meal-planner/api/**"],
+                    "message": "packages/ai must not depend on @meal-planner/api. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/web", "@meal-planner/web/**"],
+                    "message": "packages/ai must not depend on @meal-planner/web. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/api/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@meal-planner/web", "@meal-planner/web/**"],
+                    "message": "apps/api must not depend on @meal-planner/web. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/web/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@meal-planner/db", "@meal-planner/db/**"],
+                    "message": "apps/web must not depend on @meal-planner/db. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  },
+                  {
+                    "group": ["@meal-planner/ai", "@meal-planner/ai/**"],
+                    "message": "apps/web must not depend on @meal-planner/ai. contracts <- core <- db/ai <- api; web may use contracts, core and the api's AppType. See docs/architecture.md \u00a75."
+                  }
+                ],
+                "paths": {
+                  "@meal-planner/api": {
+                    "allowImportNames": ["AppType"],
+                    "message": "apps/web may only import the AppType type from @meal-planner/api."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

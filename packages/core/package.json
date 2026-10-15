@@ -1,0 +1,14 @@
+{
+  "name": "@meal-planner/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@meal-planner/contracts": "workspace:*"
+  }
+}
