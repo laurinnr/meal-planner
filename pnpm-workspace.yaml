@@ -1,0 +1,7 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Refuse dependency versions published less than 7 days ago (in minutes).
+# Most malicious releases are caught and yanked within that window.
+minimumReleaseAge: 10080
