@@ -51,6 +51,11 @@ packages/db          Drizzle schema + migrations (SQLite), tenant-scoped reposit
 packages/ai          Claude capabilities: extract, chat, plan (Effect; exports Promises)
 ```
 
+Dependencies point one way: `contracts` ← `core` ← `db`/`ai` ← `api`, and `web` may use
+`contracts`, `core` and the API's `AppType`. `pnpm lint` fails on any import that breaks
+this (Biome `noRestrictedImports` overrides in `biome.json`) or on any package a
+workspace doesn't declare in its own `package.json`.
+
 See [docs/architecture.md](docs/architecture.md) for the reasoning behind each
 choice, the build order, and the open questions.
 
