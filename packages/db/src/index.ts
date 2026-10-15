@@ -1,1 +1,1 @@
-export { type Database, openDatabase } from "./client.ts";
+export { type Database, type OpenOptions, openDatabase } from "./client.ts";

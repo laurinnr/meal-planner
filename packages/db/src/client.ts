@@ -7,6 +7,14 @@ import * as schema from "./schema.ts";
 
 const migrationsFolder = resolve(import.meta.dirname, "../migrations");
 
+export interface OpenOptions {
+  /**
+   * Fail instead of creating the file when it doesn't exist. The API sets this so
+   * a wrong DATABASE_PATH can't quietly start it on an empty, unmigrated file.
+   */
+  mustExist?: boolean;
+}
+
 /**
  * A connection to the app database. The Drizzle handle stays private to this
  * package; callers get narrow methods instead (architecture §4.1).
@@ -15,8 +23,8 @@ export class Database {
   readonly #sqlite: BetterSqlite3.Database;
   readonly #db: BetterSQLite3Database<typeof schema>;
 
-  constructor(path: string) {
-    this.#sqlite = new BetterSqlite3(path);
+  constructor(path: string, options: OpenOptions = {}) {
+    this.#sqlite = new BetterSqlite3(path, { fileMustExist: options.mustExist ?? false });
     // Connection settings, not file settings: apply them on every open.
     this.#sqlite.pragma("journal_mode = WAL");
     this.#sqlite.pragma("foreign_keys = ON");
@@ -56,6 +64,6 @@ export class Database {
   }
 }
 
-export function openDatabase(path: string): Database {
-  return new Database(path);
+export function openDatabase(path: string, options?: OpenOptions): Database {
+  return new Database(path, options);
 }
