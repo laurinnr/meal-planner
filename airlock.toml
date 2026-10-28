@@ -1,0 +1,44 @@
+[packs]
+debian = { version = "1", args = { allow-apt = true } }
+claude = { version = "1", args = { acp = false } }
+codex = { version = "1", args = { acp = false } }
+docker = { version = "1", args = { allow-pulls = true } }
+git = { version = "1" }
+mise = { version = "1" }
+# Node and pnpm come from mise.toml; this pack only adds nvm and the npm registry rule.
+nodejs = { version = "1", args = { allow-npm = true, node-version = "none" } }
+
+# Downloads for `mise install` (Node from nodejs.org, pnpm from GitHub releases).
+# github.com redirects release downloads to release-assets.githubusercontent.com;
+# mise checks the asset via api.github.com and looks up versions at mise-versions.jdx.dev.
+# tuf-repo-cdn.sigstore.dev serves the trust root for verifying GitHub artifact attestations.
+[network.rules.mise-tools]
+allow = [
+  "nodejs.org:443",
+  "github.com:443",
+  "release-assets.githubusercontent.com:443",
+  "objects.githubusercontent.com:443",
+  "api.github.com:443",
+  "mise-versions.jdx.dev:443",
+  "tuf-repo-cdn.sigstore.dev:443",
+]
+
+# API dev server, reachable from the host at localhost:3000.
+[network.ports.dev]
+guest = ["3000:3000"]
+
+# Keep the sandbox's Linux node_modules apart from the host's macOS ones.
+[disk.cache.node-modules]
+paths = [
+  "node_modules",
+  "apps/api/node_modules",
+  "apps/web/node_modules",
+  "packages/ai/node_modules",
+  "packages/contracts/node_modules",
+  "packages/core/node_modules",
+  "packages/db/node_modules",
+]
+
+[clipboard]
+copy = true
+paste = false
