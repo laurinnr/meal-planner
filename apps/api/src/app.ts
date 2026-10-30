@@ -1,4 +1,5 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import { ApiStatus } from "@meal-planner/contracts";
 import type { Database } from "@meal-planner/db";
 import type { Logger } from "./logger.ts";
 
@@ -31,6 +32,18 @@ const ready = createRoute({
     503: {
       description: "The database cannot be queried",
       content: { "application/json": { schema: z.object({ status: z.literal("unavailable") }) } },
+    },
+  },
+});
+
+const status = createRoute({
+  method: "get",
+  path: "/status",
+  summary: "What the API reports about itself, for the web app",
+  responses: {
+    200: {
+      description: "Current status",
+      content: { "application/json": { schema: ApiStatus } },
     },
   },
 });
@@ -76,6 +89,22 @@ export function createApp({ database, logger }: AppDependencies) {
         logger.warn({ err: error }, "readiness check failed");
         return c.json({ status: "unavailable" } as const, 503);
       }
+    })
+    .openapi(status, (c) => {
+      let databaseStatus: ApiStatus["database"] = "ok";
+      try {
+        database.ping();
+      } catch {
+        databaseStatus = "unavailable";
+      }
+      return c.json(
+        {
+          service: "meal-planner-api",
+          database: databaseStatus,
+          checkedAt: new Date().toISOString(),
+        } as const,
+        200,
+      );
     });
 }
 
