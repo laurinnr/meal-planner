@@ -19,7 +19,7 @@ Pre-implementation. The design is in **[docs/architecture.md](docs/architecture.
 | Backend | Hono + `@hono/zod-openapi`, Drizzle ORM (`sqlite-core`), SQLite |
 | Frontend | Vite, React 19, TanStack Router/Query/Form, Tailwind 4 |
 | AI | Claude (`@anthropic-ai/sdk`) — structured outputs, tool use, streaming; Effect inside `packages/ai` |
-| Deployment | Docker Compose behind Caddy (runs under Podman too), over Tailscale |
+| Deployment | Docker Compose behind Caddy on a Synology NAS (Podman for local dev), remote access over the router's VPN |
 
 ## Getting started
 
