@@ -660,7 +660,7 @@ the database container, so there are two services:
 ```
               ┌──────────────────────────────────────────┐
   LAN ───────►│ caddy      :8443 TLS, static SPA, /api/* │
-  Tailscale   └────────────┬─────────────────────────────┘
+  VPN         └────────────┬─────────────────────────────┘
                            │ /api/* → api:3000
               ┌────────────▼─────────────────────────────┐
               │ api    Node 26 + Hono                    │──► api.anthropic.com
@@ -674,9 +674,8 @@ Caddy serves the built SPA as static files and reverse-proxies `/api/*` — no s
 web container, and no CORS, because everything is same-origin.
 
 DSM's own web server already holds ports 80 and 443 on the NAS, so Caddy publishes high
-ports (8080/8443) instead. Moving DSM off them is possible but fights every DSM update.
-With Tailscale (§8.5), `tailscale serve` on the NAS fronts Caddy and the port number
-never shows in a URL.
+ports (8080/8443) instead. Moving DSM off them is possible but fights every DSM update,
+so the app's URL carries the port.
 
 **The one rule that matters here: the SQLite file must never live on the container's
 overlay filesystem.** SQLite's WAL mode depends on POSIX advisory locking and coherent
@@ -771,17 +770,23 @@ The SPA is a separate build stage whose `dist/` is copied into the Caddy image.
 A shopping list is used in a shop, which is not on your LAN. This is a real
 constraint, not a detail, and it has two answers:
 
-- **Tailscale** (recommended). The NAS joins your tailnet through Synology's Tailscale
-  package; the phone reaches it from
-  anywhere with nothing exposed to the internet. With Tailscale's HTTPS certs you also
-  get a trusted certificate without a DNS-01 dance — and `tailscale serve` can
-  terminate TLS, which sidesteps the DSM port clash in §8.1.
+- **The router's VPN** (recommended). The UniFi gateway's built-in remote access —
+  Teleport or its WireGuard VPN server — puts the phone on the LAN from anywhere, with
+  nothing on the NAS exposed to the internet and no extra software on the NAS. The app
+  needs nothing VPN-specific: to it, a remote phone is just another LAN client.
 - **Offline-first PWA.** Installable, caches the current shopping list, works with no
   connectivity at all. Worth doing anyway — supermarket signal is bad — but local
   writes and sync are a real project. Phase it as read-only caching first: the list
   renders offline, ticking items off syncs when you're back.
 
-Do Tailscale first; treat offline write sync as a stretch goal.
+Do the VPN first; treat offline write sync as a stretch goal.
+
+**TLS on the LAN.** A PWA's service worker only runs in a secure context, so the app
+needs HTTPS with a certificate the phone trusts. The plan: a hostname on a domain you
+own, resolved to the NAS's LAN address by a local DNS record on the UniFi gateway (VPN
+clients use the gateway for DNS too), and a certificate Caddy obtains through ACME
+DNS-01 — which needs no inbound port, so nothing is exposed. Caddy's internal CA is the
+fallback, at the cost of installing its root certificate on every device. See §11.
 
 ### 8.6 CI/CD
 
@@ -825,7 +830,7 @@ only once there's data for it to work on.
 | **3. AI: recipe import** | JSON-LD fast path → Claude structured-output fallback, photo import, `ai_calls` logging. Effect enters here, in `packages/ai` only | First AI feature, highest value, and it's the one that fills the database. Effect lands with the first code that needs retries and timeouts, not before. |
 | **4. AI: streaming chat** | SSE envelope, Hono `streamSSE`, React stream consumer | Streaming touches every layer — good architectural stress test. |
 | **5. AI: week planning agent** | Tool runner, three tools, draft-and-confirm UX, budget caps | Needs phases 1–3 in place to have anything to reason over. |
-| **6. Polish** | PWA + Tailscale, `sqlite-vec` semantic search, cost dashboard, Playwright E2E | The "actually use it" phase. |
+| **6. Polish** | PWA + remote access over the router's VPN, `sqlite-vec` semantic search, cost dashboard, Playwright E2E | The "actually use it" phase. |
 
 Phases 0–2 are a working meal planner with no AI in it. That is intentional: if the
 Anthropic API is down, or you run out of credits, or you just want to add a recipe on
@@ -848,7 +853,7 @@ a plane, the app still does its job.
 | Lint/format | Biome | ESLint + Prettier | One tool, one config, far faster. |
 | Containers | Docker Compose | Podman Quadlet; k3s | Compose is the portable interface — Podman runs the same file, so local dev can be rootless without the deployment target changing. |
 | Backups | Litestream continuous | Nightly dump | Recovery point in seconds. Keep a periodic `VACUUM INTO` snapshot alongside it. |
-| Remote access | Tailscale | Port-forward + DDNS | Nothing exposed to the internet. |
+| Remote access | UniFi gateway VPN (Teleport / WireGuard) | Tailscale; port-forward + DDNS | Nothing exposed to the internet, and the router already does it — no agent on the NAS. |
 | Effects | Effect, inside `packages/ai` only | Effect everywhere; plain async/await | Retries, timeouts, typed failures and spans are what it's for, and the package boundary keeps it reversible. Everywhere means re-deciding Hono, Drizzle and Zod. |
 | AI provider | Anthropic hosted | Local Ollama | Structured outputs and tool use are reliable, which is what these features depend on. |
 
@@ -887,3 +892,7 @@ a plane, the app still does its job.
    and Drizzle integration layers. Decide with experience, not in advance.
 4. ~~How far does the pantry go?~~ **Decided:** no pantry. The shopping list is
    checked off against what's at home (§2).
+5. **Which domain and DNS provider for the LAN certificate?** §8.5 assumes a domain
+   whose DNS provider Caddy has an ACME DNS-01 plugin for; without one, fall back to
+   Caddy's internal CA. Decide before the Caddy image is built (phase 0), because a
+   DNS plugin means a custom Caddy build.
