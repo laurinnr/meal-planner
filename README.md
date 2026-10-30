@@ -43,6 +43,19 @@ pnpm dev              # API on http://127.0.0.1:3000 (/health, /ready, /openapi.
 | `pnpm db:generate` | Generate a SQL migration from `packages/db/src/schema.ts` — read it before committing |
 | `pnpm db:migrate` | Apply pending migrations to `DATABASE_PATH` (default `data/meal-planner.db`). Never runs on API boot |
 
+### Containers
+
+The deployment runs from `docker/compose.yaml`: a one-shot `migrate`, the Node API,
+and Caddy serving the SPA with `/api/*` proxied. To run it locally:
+
+```sh
+podman compose -f docker/compose.yaml up --build   # or docker compose
+curl -k https://localhost:8443/api/health
+```
+
+Caddy uses its internal CA, so browsers warn until its root (in the `caddy-data` volume,
+`pki/authorities/local/root.crt`) is trusted. Settings are in `docker/.env.example`.
+
 pnpm refuses dependency versions published less than 7 days ago
 (`minimumReleaseAge` in `pnpm-workspace.yaml`).
 

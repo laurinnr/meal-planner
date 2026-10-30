@@ -105,7 +105,7 @@ this size. The ESLint plugin ecosystem is richer, but nothing here needs it.
 | ORM / query builder | Drizzle ORM (`sqlite-core`) + drizzle-kit | 0.45 / 0.31 |
 | Database | SQLite via `better-sqlite3` (bundles SQLite 3.53, FTS5, JSON) | 13.0 |
 | Vector search (phase 6) | `sqlite-vec` loaded as an extension | 0.1.9 |
-| Backup | Litestream (continuous replication) | 0.5.x |
+| Backup | Daily SQLite snapshot + off-NAS copy | SQLite `VACUUM INTO` |
 | Auth | better-auth | 1.7 |
 | Logging | pino | 10.x |
 | LLM | `@anthropic-ai/sdk` | 0.127 |
@@ -380,8 +380,7 @@ meal-planner/
 ├── docker/
 │   ├── compose.yaml
 │   ├── Dockerfile              # api image (multi-stage)
-│   ├── Caddyfile
-│   └── litestream.yml
+│   └── Caddyfile
 ├── docs/
 │   └── architecture.md         # this file
 └── turbo.json
@@ -664,7 +663,7 @@ the database container, so there are two services:
                            │ /api/* → api:3000
               ┌────────────▼─────────────────────────────┐
               │ api    Node 26 + Hono                    │──► api.anthropic.com
-              │        litestream -exec "node ..."       │──► off-host replica
+              │        node dist/app/main.js             │
               │                                          │
               │        /data/app.db  ◄── named volume ───┼──► real fs, NOT overlay
               └──────────────────────────────────────────┘
@@ -672,6 +671,9 @@ the database container, so there are two services:
 
 Caddy serves the built SPA as static files and reverse-proxies `/api/*` — no separate
 web container, and no CORS, because everything is same-origin.
+
+A daily one-shot command writes a consistent SQLite snapshot to a host-visible
+folder. The NAS backup task copies completed snapshots off-host (§8.4).
 
 DSM's own web server already holds ports 80 and 443 on the NAS, so Caddy publishes high
 ports (8080/8443) instead. Moving DSM off them is possible but fights every DSM update,
@@ -708,10 +710,9 @@ Three more things bite only on the rootless dev side:
 
 - **Privileged ports.** A rootless container cannot bind 443 — another reason the
   Compose file publishes high ports.
-- **Volume ownership.** Rootless maps container UIDs into your subuid range, so files
-  a container writes appear on the host owned by a high-numbered UID. Invisible for
-  named volumes; for bind mounts use `userns: keep-id` so `litestream restore` works
-  without `sudo`. Keep `app.db` on a named volume and bind-mount only read-only config.
+- **Volume ownership.** Rootless Podman maps container UIDs into your subuid
+  range. Every service writing the database must use the same mapping. Keep
+  `app.db` on a named volume; export backups separately from the live database.
 - **SELinux.** On Fedora/RHEL, bind mounts need a `:Z` or `:z` suffix or the container
   gets permission denied on a path that looks perfectly readable.
 
@@ -725,10 +726,12 @@ Multi-stage Dockerfile for the API:
 
 1. **deps** — `pnpm fetch` against the lockfile only, so the layer caches until a
    dependency actually changes.
-2. **build** — install, compile, then `pnpm deploy --filter=api --prod` for a pruned
-   `node_modules` without the workspace dev tree.
-3. **runtime** — `node:26-alpine`, non-root user, pruned output plus the Litestream
-   binary. The healthcheck hitting `/health` is declared in Compose (§8.2).
+2. **build** — install, bundle the API with esbuild (Node won't strip types from the
+   workspace packages' `.ts` once they sit under `node_modules`), then
+   `pnpm deploy --filter=api --prod` for a pruned `node_modules` without the workspace
+   dev tree.
+3. **runtime** — `node:26-alpine`, non-root user and pruned output. The healthcheck
+   hitting `/health` is declared in Compose (§8.2).
 
 The NAS is x86_64, so CI builds `linux/amd64` images only.
 
@@ -736,11 +739,10 @@ The NAS is x86_64, so CI builds `linux/amd64` images only.
 uses, or the prebuilt binary will not match the runtime's libc. `node:26-alpine` is
 musl — if prebuilds give trouble, `node:26-slim` (glibc) is the boring fix.
 
-Entrypoint wraps the app in Litestream so replication and process lifetime are the
-same thing:
+The entrypoint runs Node directly:
 
 ```
-litestream replicate -exec "node dist/main.js"
+node dist/app/main.js
 ```
 
 The SPA is a separate build stage whose `dist/` is copied into the Caddy image.
@@ -755,15 +757,14 @@ The SPA is a separate build stage whose `dist/` is copied into the Caddy image.
   SQLite this matters more than usual: drizzle-kit emits table-recreate migrations for
   column changes, so read them rather than skimming them. A table recreate also drops
   and rebuilds foreign keys — see the tenancy note in §4.1 before approving one.
-- **Backups:** Litestream replicates continuously to a second physical disk or an
-  S3-compatible target, which beats a nightly dump — the recovery point is seconds,
-  not a day. Two caveats: Litestream v0.5 rewrote its storage format to LTX and
-  [the v0.3 → v0.5 migration path has open bugs](https://github.com/benbjohnson/litestream/issues/1512),
-  so start on v0.5 and don't plan to upgrade across it; and v0.5 dropped age
-  encryption. Keep a periodic `VACUUM INTO` snapshot alongside — a single consistent
-  file you can copy anywhere is worth having when the replica is what went wrong.
-  **Restore one and check the row counts.** A backup you have never restored is a
-  hypothesis.
+- **Backups:** daily `VACUUM INTO` snapshots, with a small local retention window
+  and completed files copied off the NAS by its backup facility. This household app
+  has no strict availability target and accepts losing changes since the last
+  successful daily backup. Check failures of both snapshot creation and off-host
+  transfer. Rehearse a restore with known data and SQLite integrity checks, preserving
+  the original database until recovery is verified. An older backup is expected to
+  differ from the current live database. Continuous replication is deferred until
+  a shorter recovery point or a deliberate learning exercise justifies it.
 
 ### 8.5 Access from outside the LAN
 
@@ -792,7 +793,8 @@ with the DNS provider's plugin. See §11.
 
 ### 8.6 CI/CD
 
-GitHub Actions on push: Biome → `tsc --noEmit` → Vitest → build image → push to GHCR.
+GitHub Actions runs Biome → `tsc --noEmit` → Vitest. Image publication will depend
+on those checks before a revision is deployed.
 
 Deployment is a pull, not a push: `docker compose pull && docker compose up -d` on the
 NAS, run over SSH (or from the Project in Container Manager's UI) by hand or by a small
@@ -854,7 +856,7 @@ a plane, the app still does its job.
 | Auth | better-auth in-app | Authelia/Authentik forward-auth | Keeps auth in the TypeScript being practised; can move to the proxy later. |
 | Lint/format | Biome | ESLint + Prettier | One tool, one config, far faster. |
 | Containers | Docker Compose | Podman Quadlet; k3s | Compose is the portable interface — Podman runs the same file, so local dev can be rootless without the deployment target changing. |
-| Backups | Litestream continuous | Nightly dump | Recovery point in seconds. Keep a periodic `VACUUM INTO` snapshot alongside it. |
+| Backups | Daily SQLite snapshot + off-NAS copy | Continuous replication | A day of lost edits is acceptable; one backup and restore path is enough. |
 | Remote access | UniFi gateway VPN (Teleport / WireGuard) | Tailscale; port-forward + DDNS | Nothing exposed to the internet, and the router already does it — no agent on the NAS. |
 | Effects | Effect, inside `packages/ai` only | Effect everywhere; plain async/await | Retries, timeouts, typed failures and spans are what it's for, and the package boundary keeps it reversible. Everywhere means re-deciding Hono, Drizzle and Zod. |
 | AI provider | Anthropic hosted | Local Ollama | Structured outputs and tool use are reliable, which is what these features depend on. |
