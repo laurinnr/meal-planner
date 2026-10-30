@@ -653,12 +653,13 @@ Small app, but the habits are the point.
 
 ### 8.1 Topology
 
-Single host, Docker Compose. SQLite removed the database container, so there are two
-services:
+Single host: a Synology Plus-series NAS (x86_64) running Docker through DSM's
+**Container Manager** package, which runs a Compose file as a "Project". SQLite removed
+the database container, so there are two services:
 
 ```
               ┌──────────────────────────────────────────┐
-  LAN ───────►│ caddy      :443  TLS, static SPA, /api/* │
+  LAN ───────►│ caddy      :8443 TLS, static SPA, /api/* │
   Tailscale   └────────────┬─────────────────────────────┘
                            │ /api/* → api:3000
               ┌────────────▼─────────────────────────────┐
@@ -672,6 +673,11 @@ services:
 Caddy serves the built SPA as static files and reverse-proxies `/api/*` — no separate
 web container, and no CORS, because everything is same-origin.
 
+DSM's own web server already holds ports 80 and 443 on the NAS, so Caddy publishes high
+ports (8080/8443) instead. Moving DSM off them is possible but fights every DSM update.
+With Tailscale (§8.5), `tailscale serve` on the NAS fronts Caddy and the port number
+never shows in a URL.
+
 **The one rule that matters here: the SQLite file must never live on the container's
 overlay filesystem.** SQLite's WAL mode depends on POSIX advisory locking and coherent
 mmap of the `-shm` file, and overlay and network filesystems
@@ -680,16 +686,29 @@ Put it on a named volume — a real host filesystem — and never in a path that
 through to the image's writable layer. This was a non-issue with Postgres and is now
 the single most important deployment detail.
 
-### 8.2 Running it with Podman
+### 8.2 Docker on the NAS, Podman on the dev machine
 
-The Compose file is the interface, and Podman consumes it — either through
-`podman compose` or by pointing the Docker CLI at Podman's compatible socket. Images
-are OCI either way, so nothing in the build changes. Three things bite when you run
-the same file rootless:
+Two runtimes consume the same Compose file: rootful Docker (Container Manager) on the
+NAS, and rootless Podman on the development machine, through `podman compose` or the
+Docker CLI pointed at Podman's compatible socket. Images are OCI either way, so nothing
+in the build changes. The rule that keeps one file working on both:
 
-- **Privileged ports.** A rootless container cannot bind 443. Either
-  `sysctl net.ipv4.ip_unprivileged_port_start=80`, or let `tailscale serve` terminate
-  TLS and bind Caddy high — which §8.6 leans on anyway.
+- **`compose.yaml` holds only what both accept** — named volumes, `cap_drop`,
+  `security_opt: [no-new-privileges:true]`, `depends_on` with conditions, published
+  high ports. Podman-only settings such as `userns: keep-id` go in a
+  `compose.podman.yaml` override used only on the dev machine; Docker rejects them.
+- **Healthchecks live in `compose.yaml`, not the Dockerfile.** Podman builds OCI-format
+  images by default, and the OCI format has no `HEALTHCHECK`, so a Dockerfile
+  healthcheck silently vanishes from a locally built image.
+- **Assume an older Docker.** Container Manager's Docker Engine and Compose plugin
+  trail upstream releases. Stick to long-established Compose features and check
+  `docker version` and `docker compose version` on the NAS before reaching for anything
+  recent.
+
+Three more things bite only on the rootless dev side:
+
+- **Privileged ports.** A rootless container cannot bind 443 — another reason the
+  Compose file publishes high ports.
 - **Volume ownership.** Rootless maps container UIDs into your subuid range, so files
   a container writes appear on the host owned by a high-numbered UID. Invisible for
   named volumes; for bind mounts use `userns: keep-id` so `litestream restore` works
@@ -697,9 +716,9 @@ the same file rootless:
 - **SELinux.** On Fedora/RHEL, bind mounts need a `:Z` or `:z` suffix or the container
   gets permission denied on a path that looks perfectly readable.
 
-If the homelab host later moves to Podman too, Quadlet (`.container` systemd units) is
-the native path and worth the switch — but there is no reason to pay for it while
-Compose works on both.
+On the NAS, a Docker named volume lives under the data volume (`/volume1/@docker`),
+which is btrfs or ext4 — a real filesystem, so §8.1's rule holds. Never point the
+database at a shared folder that is itself mounted over the network.
 
 ### 8.3 Images
 
@@ -710,7 +729,9 @@ Multi-stage Dockerfile for the API:
 2. **build** — install, compile, then `pnpm deploy --filter=api --prod` for a pruned
    `node_modules` without the workspace dev tree.
 3. **runtime** — `node:26-alpine`, non-root user, pruned output plus the Litestream
-   binary, `HEALTHCHECK` hitting `/health`.
+   binary. The healthcheck hitting `/health` is declared in Compose (§8.2).
+
+The NAS is x86_64, so CI builds `linux/amd64` images only.
 
 `better-sqlite3` is a native module: build it in the same base image the runtime stage
 uses, or the prebuilt binary will not match the runtime's libc. `node:26-alpine` is
@@ -750,10 +771,11 @@ The SPA is a separate build stage whose `dist/` is copied into the Caddy image.
 A shopping list is used in a shop, which is not on your LAN. This is a real
 constraint, not a detail, and it has two answers:
 
-- **Tailscale** (recommended). The host joins your tailnet; the phone reaches it from
+- **Tailscale** (recommended). The NAS joins your tailnet through Synology's Tailscale
+  package; the phone reaches it from
   anywhere with nothing exposed to the internet. With Tailscale's HTTPS certs you also
   get a trusted certificate without a DNS-01 dance — and `tailscale serve` can
-  terminate TLS, which sidesteps the rootless privileged-port problem in §8.2.
+  terminate TLS, which sidesteps the DSM port clash in §8.1.
 - **Offline-first PWA.** Installable, caches the current shopping list, works with no
   connectivity at all. Worth doing anyway — supermarket signal is bad — but local
   writes and sync are a real project. Phase it as read-only caching first: the list
@@ -766,7 +788,9 @@ Do Tailscale first; treat offline write sync as a stretch goal.
 GitHub Actions on push: Biome → `tsc --noEmit` → Vitest → build image → push to GHCR.
 
 Deployment is a pull, not a push: `docker compose pull && docker compose up -d` on the
-host, run by hand or by a small `make deploy` over SSH. Manual deploys are honestly
+NAS, run over SSH (or from the Project in Container Manager's UI) by hand or by a small
+`make deploy`. The NAS logs in to GHCR once with a read-only token
+(`docker login ghcr.io`) so it can pull private images. Manual deploys are honestly
 fine for a household app, and knowing exactly when one happened makes debugging easier.
 
 Local development needs no containers at all — SQLite is a file and the API is a Node
