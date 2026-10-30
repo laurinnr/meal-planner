@@ -3,7 +3,9 @@
   "compilerOptions": {
     "lib": ["es2025", "dom", "dom.iterable"],
     "module": "preserve",
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"]
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }
