@@ -56,12 +56,13 @@ curl -k https://localhost:8443/api/health
 
 Caddy uses its internal CA, so browsers warn until its root (in the `caddy-data` volume,
 `pki/authorities/local/root.crt`) is trusted. Settings are in `docker/.env.example`.
+Deploying to the NAS, backups and restores: [docs/deploy.md](docs/deploy.md).
 Backups are daily SQLite snapshots copied off the NAS; losing changes since the
 last successful backup is acceptable for this household app.
 
 The Podman override maps both database-writing services to your host user. Existing
 development volumes created with a different mapping need an explicit ownership
-transition before they can be reused.
+transition; see the runbook before reusing them.
 
 pnpm refuses dependency versions published less than 7 days ago
 (`minimumReleaseAge` in `pnpm-workspace.yaml`).
