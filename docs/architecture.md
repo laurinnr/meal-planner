@@ -782,11 +782,13 @@ constraint, not a detail, and it has two answers:
 Do the VPN first; treat offline write sync as a stretch goal.
 
 **TLS on the LAN.** A PWA's service worker only runs in a secure context, so the app
-needs HTTPS with a certificate the phone trusts. The plan: a hostname on a domain you
-own, resolved to the NAS's LAN address by a local DNS record on the UniFi gateway (VPN
-clients use the gateway for DNS too), and a certificate Caddy obtains through ACME
-DNS-01 — which needs no inbound port, so nothing is exposed. Caddy's internal CA is the
-fallback, at the cost of installing its root certificate on every device. See §11.
+needs HTTPS with a certificate the phone trusts. For now Caddy issues it from its
+**internal CA** (`tls internal`): the CA's root lives in Caddy's data volume, and each
+device installs it once. The hostname is resolved to the NAS's LAN address by a local
+DNS record on the UniFi gateway, which VPN clients use for DNS too. The upgrade path is
+a hostname on a domain you own with a certificate from ACME DNS-01 — publicly trusted,
+no per-device setup, and still no inbound port — at the cost of a custom Caddy build
+with the DNS provider's plugin. See §11.
 
 ### 8.6 CI/CD
 
@@ -892,7 +894,6 @@ a plane, the app still does its job.
    and Drizzle integration layers. Decide with experience, not in advance.
 4. ~~How far does the pantry go?~~ **Decided:** no pantry. The shopping list is
    checked off against what's at home (§2).
-5. **Which domain and DNS provider for the LAN certificate?** §8.5 assumes a domain
-   whose DNS provider Caddy has an ACME DNS-01 plugin for; without one, fall back to
-   Caddy's internal CA. Decide before the Caddy image is built (phase 0), because a
-   DNS plugin means a custom Caddy build.
+5. ~~Which certificate on the LAN?~~ **Decided for now:** Caddy's internal CA (§8.5).
+   Revisit with a domain and ACME DNS-01 if installing the root on each device gets
+   old.
