@@ -48,6 +48,15 @@ export class Database {
     return this.#appliedMigrations() - before;
   }
 
+  /**
+   * Writes a compacted, consistent copy of the database to `path`, which must not
+   * exist yet. Safe while the API is running: `VACUUM INTO` reads a single snapshot
+   * and blocks no writers (docs/deploy.md).
+   */
+  snapshot(path: string): void {
+    this.#sqlite.prepare("vacuum into ?").run(path);
+  }
+
   close(): void {
     this.#sqlite.close();
   }
