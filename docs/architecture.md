@@ -793,8 +793,10 @@ with the DNS provider's plugin. See §11.
 
 ### 8.6 CI/CD
 
-GitHub Actions runs Biome → `tsc --noEmit` → Vitest. Image publication will depend
-on those checks before a revision is deployed.
+One GitHub Actions workflow runs Biome → `tsc --noEmit` → Vitest, then image jobs
+with an explicit dependency on those checks. PRs and manual runs build images;
+only a validated `main` revision publishes to GHCR. Pin a deployment to the revision
+tag after both image jobs succeed.
 
 Deployment is a pull, not a push: `docker compose pull && docker compose up -d` on the
 NAS, run over SSH (or from the Project in Container Manager's UI) by hand or by a small
