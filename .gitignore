@@ -9,4 +9,5 @@ dist/
 
 .idea
 /data/
+/docker/snapshots/
 airlock.local.toml

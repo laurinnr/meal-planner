@@ -1,0 +1,15 @@
+# Rootless Podman only, layered over compose.yaml (docs/architecture.md §8.2). Docker
+# rejects these settings, so they stay out of the shared file.
+#
+#   podman compose -f docker/compose.yaml -f docker/compose.podman.yaml up --build
+services:
+  migrate:
+    # Every writer of the shared database must use the same host identity.
+    userns_mode: keep-id:uid=1000,gid=1000
+  api:
+    # Map your own user to the container's uid 1000, so snapshots it writes to the
+    # bind mount are owned by you on the host instead of a subuid.
+    userns_mode: keep-id:uid=1000,gid=1000
+    volumes:
+      # :z relabels the folder for SELinux (Fedora/RHEL); harmless elsewhere.
+      - ${SNAPSHOT_DIR:-./snapshots}:/snapshots:z

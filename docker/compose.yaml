@@ -1,7 +1,7 @@
 # The whole deployment: Docker (Container Manager) on the NAS, rootless Podman locally.
 # Keep to features both accept (docs/architecture.md §8.2).
 #
-#   podman compose -f docker/compose.yaml up --build    # local, built from source
+#   podman compose -f docker/compose.yaml -f docker/compose.podman.yaml up --build
 #   docker compose pull && docker compose up -d          # on the NAS, from GHCR
 #
 # Settings come from docker/.env (see .env.example next to this file).
@@ -35,6 +35,9 @@ services:
     volumes:
       # SQLite on a named volume, never the container's overlay filesystem (§8.1).
       - db:/data
+      # Nightly VACUUM INTO copies, in a folder the host's own backups can see
+      # (docs/deploy.md). The container's user (uid 1000) must be able to write it.
+      - ${SNAPSHOT_DIR:-./snapshots}:/snapshots
     depends_on:
       migrate:
         condition: service_completed_successfully
