@@ -1,0 +1,76 @@
+# The whole deployment: Docker (Container Manager) on the NAS, rootless Podman locally.
+# Keep to features both accept (docs/architecture.md §8.2).
+#
+#   podman compose -f docker/compose.yaml up --build    # local, built from source
+#   docker compose pull && docker compose up -d          # on the NAS, from GHCR
+#
+# Settings come from docker/.env (see .env.example next to this file).
+name: meal-planner
+
+x-hardened: &hardened
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  restart: unless-stopped
+
+x-api-image: &api-image
+  image: ghcr.io/laurinnr/meal-planner-api:${IMAGE_TAG:-latest}
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    target: api
+
+services:
+  # Applies pending migrations, then exits. The API never migrates on boot (§8.4).
+  migrate:
+    <<: [*hardened, *api-image]
+    restart: "no"
+    entrypoint: ["node", "dist/app/migrate.js"]
+    volumes:
+      - db:/data
+
+  api:
+    <<: [*hardened, *api-image]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # SQLite on a named volume, never the container's overlay filesystem (§8.1).
+      - db:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  caddy:
+    <<: *hardened
+    image: ghcr.io/laurinnr/meal-planner-web:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: web
+    environment:
+      # The hostname devices use, e.g. a local DNS record on the router (§8.5).
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      # Holds the internal CA; losing it means reinstalling its root on every device.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  db:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,31 @@
+# Serves the SPA and proxies the API, same-origin (docs/architecture.md §8.1).
+{
+	# DSM holds 80 and 443 on the NAS, so listen high. Publish these ports unchanged.
+	http_port 8080
+	https_port 8443
+	# Runs unprivileged and can't touch the system trust store; devices install the
+	# internal CA's root by hand (docs/architecture.md §8.5).
+	skip_install_trust
+}
+
+# Caddy's automatic redirect would drop the non-standard HTTPS port.
+http://{$SITE_ADDRESS:localhost} {
+	redir https://{host}:8443{uri} permanent
+}
+
+{$SITE_ADDRESS:localhost} {
+	tls internal
+	encode
+
+	# The API's routes have no /api prefix.
+	handle_path /api/* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		root * /srv
+		# Client-side routes fall back to the SPA's entry point.
+		try_files {path} /index.html
+		file_server
+	}
+}
