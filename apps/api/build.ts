@@ -7,7 +7,7 @@ import { build } from "esbuild";
 // node_modules: better-sqlite3 has to, being native, and bundling the rest buys nothing.
 await rm("dist", { recursive: true, force: true });
 await build({
-  entryPoints: ["src/main.ts", "src/migrate.ts"],
+  entryPoints: ["src/main.ts", "src/migrate.ts", "src/snapshot.ts"],
   outdir: "dist/app",
   bundle: true,
   platform: "node",
