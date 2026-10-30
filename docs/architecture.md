@@ -380,7 +380,8 @@ meal-planner/
 ├── docker/
 │   ├── compose.yaml
 │   ├── Dockerfile              # api image (multi-stage)
-│   └── Caddyfile
+│   ├── Caddyfile
+│   └── compose.podman.yaml
 ├── docs/
 │   └── architecture.md         # this file
 └── turbo.json
@@ -710,9 +711,11 @@ Three more things bite only on the rootless dev side:
 
 - **Privileged ports.** A rootless container cannot bind 443 — another reason the
   Compose file publishes high ports.
-- **Volume ownership.** Rootless Podman maps container UIDs into your subuid
-  range. Every service writing the database must use the same mapping. Keep
-  `app.db` on a named volume; export backups separately from the live database.
+- **Volume ownership.** The Podman override uses `keep-id:uid=1000,gid=1000` for
+  both migration and API, so every database writer maps to the same host identity
+  and exported snapshots belong to the invoking user. Keep `app.db` on a named
+  volume; bind-mount the snapshot export folder separately. Existing volumes retain
+  their old ownership and need an explicit transition before changing mappings.
 - **SELinux.** On Fedora/RHEL, bind mounts need a `:Z` or `:z` suffix or the container
   gets permission denied on a path that looks perfectly readable.
 
