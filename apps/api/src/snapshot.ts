@@ -4,7 +4,7 @@ import { openDatabase } from "@meal-planner/db";
 import { EnvError, parseEnv } from "./env.ts";
 
 // Writes a timestamped VACUUM INTO copy of the database into a directory and keeps the
-// newest few for the daily backup. Safe to run while the API is up.
+// newest few for the daily backup (docs/deploy.md). Safe to run while the API is up.
 //
 //   node dist/app/snapshot.js <directory> [<copies to keep, default 14>]
 

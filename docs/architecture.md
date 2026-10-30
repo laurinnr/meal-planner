@@ -804,7 +804,8 @@ tag after both image jobs succeed.
 Deployment is a pull, not a push: `docker compose pull && docker compose up -d` on the
 NAS, run over SSH (or from the Project in Container Manager's UI) by hand or by a small
 `make deploy`. The NAS logs in to GHCR once with a read-only token
-(`docker login ghcr.io`) so it can pull private images. Manual deploys are honestly
+(`docker login ghcr.io`) so it can pull private images. The runbook is
+[docs/deploy.md](deploy.md). Manual deploys are honestly
 fine for a household app, and knowing exactly when one happened makes debugging easier.
 
 Local development needs no containers at all — SQLite is a file and the API is a Node
