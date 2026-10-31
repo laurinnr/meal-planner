@@ -86,6 +86,10 @@ workspace doesn't declare in its own `package.json`.
 See [docs/architecture.md](docs/architecture.md) for the reasoning behind each
 choice, the build order, and the open questions.
 
+For individual commit reviews and a combined stack assessment, see the
+[review workflow](docs/review-workflow.md). It works with local Git history and
+saved PR/issue descriptions, without GitHub access.
+
 ## License
 
 [AGPL-3.0](LICENSE). If you run a modified version for other people over a
